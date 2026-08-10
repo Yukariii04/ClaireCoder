@@ -111,7 +111,7 @@ def get_ready_tasks(tasks: List[Task]) -> List[Task]:
     from clairecoder.engine.types import TaskState
 
     completed_ids: Set[str] = {
-        t.id for t in tasks if t.status == TaskState.COMPLETE
+        t.id for t in tasks if t.status == TaskState.SUCCEEDED
     }
 
     ready: List[Task] = []

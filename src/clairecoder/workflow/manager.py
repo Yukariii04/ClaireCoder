@@ -245,7 +245,7 @@ class WorkflowManager:
             return False
 
         # All tasks must be COMPLETE
-        if tasks and not all(t.status == TaskState.COMPLETE for t in tasks):
+        if tasks and not all(t.status == TaskState.SUCCEEDED for t in tasks):
             return False
 
         # No task may be in a FAILED state

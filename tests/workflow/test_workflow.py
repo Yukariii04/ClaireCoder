@@ -272,7 +272,7 @@ class TestTaskDependencies:
         assert ready[0].id == "t1"
 
     def test_ready_tasks_after_completion(self):
-        t1 = Task(id="t1", objective_id="obj1", description="T1", status=TaskState.COMPLETE)
+        t1 = Task(id="t1", objective_id="obj1", description="T1", status=TaskState.SUCCEEDED)
         t2 = Task(id="t2", objective_id="obj1", description="T2", dependencies=["t1"])
         tasks = [t1, t2]
         ready = get_ready_tasks(tasks)
@@ -280,8 +280,8 @@ class TestTaskDependencies:
         assert ready[0].id == "t2"
 
     def test_ready_tasks_all_completed(self):
-        t1 = Task(id="t1", objective_id="obj1", description="T1", status=TaskState.COMPLETE)
-        t2 = Task(id="t2", objective_id="obj1", description="T2", status=TaskState.COMPLETE, dependencies=["t1"])
+        t1 = Task(id="t1", objective_id="obj1", description="T1", status=TaskState.SUCCEEDED)
+        t2 = Task(id="t2", objective_id="obj1", description="T2", status=TaskState.SUCCEEDED, dependencies=["t1"])
         tasks = [t1, t2]
         ready = get_ready_tasks(tasks)
         assert len(ready) == 0  # Nothing is PENDING
@@ -383,15 +383,15 @@ class TestWorkflowCompletion:
     def test_complete_when_all_tasks_done(self, manager):
         manager.create_workflow("wf1", "obj1", "desc")
         tasks = [
-            Task(id="t1", objective_id="obj1", description="T1", status=TaskState.COMPLETE),
-            Task(id="t2", objective_id="obj1", description="T2", status=TaskState.COMPLETE),
+            Task(id="t1", objective_id="obj1", description="T1", status=TaskState.SUCCEEDED),
+            Task(id="t2", objective_id="obj1", description="T2", status=TaskState.SUCCEEDED),
         ]
         assert manager.check_completion("wf1", tasks) is True
 
     def test_incomplete_when_task_pending(self, manager):
         manager.create_workflow("wf1", "obj1", "desc")
         tasks = [
-            Task(id="t1", objective_id="obj1", description="T1", status=TaskState.COMPLETE),
+            Task(id="t1", objective_id="obj1", description="T1", status=TaskState.SUCCEEDED),
             Task(id="t2", objective_id="obj1", description="T2", status=TaskState.PENDING),
         ]
         assert manager.check_completion("wf1", tasks) is False
@@ -605,13 +605,15 @@ class TestBoundaryValidation:
 
     def test_workflow_does_not_import_tool_executor(self):
         import clairecoder.workflow.manager as mod
-        source = open(mod.__file__).read()
+        with open(mod.__file__, "r", encoding="utf-8") as f:
+            source = f.read()
         assert "ToolExecutor" not in source
         assert "Tool._execute" not in source
 
     def test_workflow_does_not_import_permission_engine(self):
         import clairecoder.workflow.manager as mod
-        source = open(mod.__file__).read()
+        with open(mod.__file__, "r", encoding="utf-8") as f:
+            source = f.read()
         # Check actual import lines, not docstring mentions
         import_lines = [line.strip() for line in source.splitlines()
                         if line.strip().startswith(("import ", "from "))]
@@ -620,7 +622,8 @@ class TestBoundaryValidation:
 
     def test_workflow_does_not_import_provider_sdks(self):
         import clairecoder.workflow.planner as mod
-        source = open(mod.__file__).read()
+        with open(mod.__file__, "r", encoding="utf-8") as f:
+            source = f.read()
         assert "openai" not in source.lower()
         assert "anthropic" not in source.lower()
         assert "google" not in source.lower()
@@ -628,24 +631,28 @@ class TestBoundaryValidation:
     def test_planner_does_not_import_model_gateway(self):
         """Planner builds requests but does not execute them."""
         import clairecoder.workflow.planner as mod
-        source = open(mod.__file__).read()
+        with open(mod.__file__, "r", encoding="utf-8") as f:
+            source = f.read()
         assert "ModelGatewayInterface" not in source
         assert "ModelGateway(" not in source
 
     def test_workflow_does_not_create_skill_registry(self):
         import clairecoder.workflow.manager as mod
-        source = open(mod.__file__).read()
+        with open(mod.__file__, "r", encoding="utf-8") as f:
+            source = f.read()
         assert "SkillRegistry()" not in source
 
     def test_workflow_does_not_mutate_engineering_context(self):
         import clairecoder.workflow.manager as mod
-        source = open(mod.__file__).read()
+        with open(mod.__file__, "r", encoding="utf-8") as f:
+            source = f.read()
         assert "EngineeringContext" not in source
 
     def test_no_phase_9_execution_state(self):
         """Workflow must not implement execution state machinery."""
         import clairecoder.workflow.types as mod
-        source = open(mod.__file__).read()
+        with open(mod.__file__, "r", encoding="utf-8") as f:
+            source = f.read()
         assert "checkpoint" not in source.lower()
         assert "recovery" not in source.lower()
         assert "retry_policy" not in source.lower()
@@ -738,7 +745,7 @@ class TestCompletionSemantics:
     def test_completed_tasks_with_unresolved_criteria_not_complete(self, manager):
         manager.create_workflow("wf1", "obj1", "desc", completion_criteria=["req1", "req2"])
         tasks = [
-            Task(id="t1", objective_id="obj1", description="T1", status=TaskState.COMPLETE)
+            Task(id="t1", objective_id="obj1", description="T1", status=TaskState.SUCCEEDED)
         ]
         # Providing only one criteria
         assert not manager.check_completion("wf1", tasks, satisfied_criteria=["req1"])
@@ -749,7 +756,7 @@ class TestCompletionSemantics:
             completion_criteria=["req1"], validation_requirements=["val1"]
         )
         tasks = [
-            Task(id="t1", objective_id="obj1", description="T1", status=TaskState.COMPLETE)
+            Task(id="t1", objective_id="obj1", description="T1", status=TaskState.SUCCEEDED)
         ]
         assert manager.check_completion("wf1", tasks, satisfied_criteria=["req1"], satisfied_validations=["val1"])
 

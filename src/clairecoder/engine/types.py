@@ -21,28 +21,7 @@ class EngineeringObjective:
     workflow_id: Optional[str] = None
     completion_criteria: List[str] = field(default_factory=list)
 
-class TaskState(str, Enum):
-    PENDING = "pending"
-    READY = "ready"
-    RUNNING = "running"
-    VALIDATING = "validating"
-    COMPLETE = "complete"
-    FAILED = "failed"
-    BLOCKED = "blocked"
-
-@dataclass
-class Task:
-    id: str
-    objective_id: str
-    description: str
-    status: TaskState = TaskState.PENDING
-    dependencies: List[str] = field(default_factory=list)
-    affected_areas: List[str] = field(default_factory=list)
-    required_capabilities: List[str] = field(default_factory=list)
-    required_skills: List[str] = field(default_factory=list)
-    validation_requirements: List[str] = field(default_factory=list)
-    result: Optional[Any] = None
-    failure_state: Optional[str] = None
+from clairecoder.execution.types import Task, TaskState
 
 class EngineEvent(str, Enum):
     OBJECTIVE_STARTED = "objective_started"

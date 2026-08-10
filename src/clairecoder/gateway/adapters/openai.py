@@ -31,13 +31,14 @@ class OpenAICompatibleAdapter(ProviderAdapterInterface):
             with urllib.request.urlopen(req) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8")
-            if e.code in (401, 403):
-                raise ModelError(ErrorCategory.AUTHENTICATION, f"Authentication failed: {error_body}")
-            elif e.code == 429:
-                raise ModelError(ErrorCategory.RATE_LIMITING, f"Rate limited: {error_body}", is_recoverable=True)
-            else:
-                raise ModelError(ErrorCategory.ENDPOINT_FAILURE, f"HTTP {e.code}: {error_body}")
+            with e:
+                error_body = e.read().decode("utf-8")
+                if e.code in (401, 403):
+                    raise ModelError(ErrorCategory.AUTHENTICATION, f"Authentication failed: {error_body}")
+                elif e.code == 429:
+                    raise ModelError(ErrorCategory.RATE_LIMITING, f"Rate limited: {error_body}", is_recoverable=True)
+                else:
+                    raise ModelError(ErrorCategory.ENDPOINT_FAILURE, f"HTTP {e.code}: {error_body}")
         except urllib.error.URLError as e:
             raise ModelError(ErrorCategory.NETWORK_FAILURE, f"Network error: {str(e)}", is_recoverable=True)
 
@@ -49,13 +50,14 @@ class OpenAICompatibleAdapter(ProviderAdapterInterface):
             req = urllib.request.Request(url, data=data, headers=headers, method="POST")
             return urllib.request.urlopen(req)
         except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8")
-            if e.code in (401, 403):
-                raise ModelError(ErrorCategory.AUTHENTICATION, f"Authentication failed: {error_body}")
-            elif e.code == 429:
-                raise ModelError(ErrorCategory.RATE_LIMITING, f"Rate limited: {error_body}", is_recoverable=True)
-            else:
-                raise ModelError(ErrorCategory.ENDPOINT_FAILURE, f"HTTP {e.code}: {error_body}")
+            with e:
+                error_body = e.read().decode("utf-8")
+                if e.code in (401, 403):
+                    raise ModelError(ErrorCategory.AUTHENTICATION, f"Authentication failed: {error_body}")
+                elif e.code == 429:
+                    raise ModelError(ErrorCategory.RATE_LIMITING, f"Rate limited: {error_body}", is_recoverable=True)
+                else:
+                    raise ModelError(ErrorCategory.ENDPOINT_FAILURE, f"HTTP {e.code}: {error_body}")
         except urllib.error.URLError as e:
             raise ModelError(ErrorCategory.NETWORK_FAILURE, f"Network error: {str(e)}", is_recoverable=True)
 

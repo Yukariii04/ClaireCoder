@@ -445,7 +445,7 @@ class EngineeringEngine:
         self._emit(EngineEvent.VALIDATION_STARTED, {"task_id": task_id})
         task = session.tasks[task_id]
         if passed:
-            task.status = TaskState.COMPLETE
+            task.status = TaskState.SUCCEEDED
             self._emit(EngineEvent.VALIDATION_COMPLETED, {"task_id": task_id, "passed": True})
             self._emit(EngineEvent.TASK_COMPLETED, {"task_id": task_id})
         else:
