@@ -111,3 +111,12 @@
 - **Files Modified**: `src/clairecoder/workflow/dependencies.py`, `src/clairecoder/workflow/manager.py`, `src/clairecoder/workflow/planner.py`, `tests/workflow/test_workflow.py`
 - **Tests**: 16 new focused Phase 8 tests; full suite passing (189 tests).
 - **Artifact**: Phase_8_Workflow_Planning_1.zip generated.
+
+### 2026-08-10 — Phase 8: Workflow & Planning (Correction #2)
+- **Status**: Completed
+- **Implemented**: Addressed 2 structural validation issues:
+  1. Structured Output Type Validation: `Planner.create_plan` strictly enforces that `structured_output` is a mapping. It correctly raises `PlanningError` for malformed outputs including explicitly provided `None`.
+  2. Duplicate Task ID Validation: `validate_plan_dependencies` now validates that `task_ids` contains no duplicates, correctly protecting both the Planner and WorkflowManager boundaries.
+- **Files Modified**: `src/clairecoder/workflow/planner.py`, `src/clairecoder/workflow/dependencies.py`, `tests/workflow/test_workflow.py`
+- **Tests**: 3 new tests added; isolated suites run, full suite passing (192 tests).
+- **Artifact**: Phase_8_Workflow_Planning_2.zip generated.
