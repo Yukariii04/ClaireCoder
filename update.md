@@ -164,3 +164,26 @@
   6. **Parser Had No Error Handling**: `shlex.split` could raise `ValueError` on malformed quoting. Added try/except fallback.
 - **Tests**: Expanded from 8 to 26 tests. Added regression tests for every defect. All 10 subsystems pass independently. Full regression: 229 passed, 0 failures, 0 errors, 0 warnings (`pytest -W error`).
 - **Artifact**: Phase_10_Interaction_Layer_1.zip generated.
+
+### 2026-08-11 — Phase 11: Verification & Validation
+- **Status**: Completed
+- **Implemented**: Created Verification & Validation subsystem (`src/clairecoder/verification/`) strictly per CC-PRD-009. Implemented `VerificationEngine` with full support for verification lifecycles, explicit criteria handling, dependency management, failure classification, timeout handling, retry boundaries, and context integration. Enforced strict architectural boundaries: Verification does not execute tools itself, bypass permissions, or couple to model providers.
+- **Tests**: `test_verification.py` implemented (45 tests). All isolated subsystem tests passed for all 11 phases. Full regression passed (274 tests total) with 0 warnings (`pytest -W error`).
+- **Artifact**: Phase_11_Verification_Validation.zip generated.
+
+### 2026-08-11 — Phase 11: Verification & Validation (Correction #1)
+- **Status**: Completed
+- **Corrections Applied**: Split `VerificationEngine` into explicit bounded components: `VerificationRunner` (interface contract, execution abstract), `VerificationResultEvaluator` (criteria processing, evidence evaluation), and `VerificationHistory` (storage and retrieval). `VerificationEngine` now orchestrates these without absorbing their responsibilities. Boundary isolation strictly maintained (no Execution/Workflow/Permission bypass).
+- **Artifact**: Phase_11_Verification_Validation_1.zip generated.
+
+### 2026-08-11 — Phase 11: Verification & Validation (Correction #2)
+- **Status**: Completed
+- **Corrections Applied**: Integrated the `VerificationRunner` formally into the `VerificationEngine` lifecycle via `execute_verification`. Engine now coordinates the full flow: receives request -> invokes Runner -> collects evidence -> passes to Evaluator -> evaluates outcome -> records via History -> returns final result. The Engine does not introduce external command execution itself and relies purely on the Runner abstraction.
+- **Tests**: Added explicit lifecycle tests (`test_execute_verification_*`). Evaluator properly processes runner failures (TOOL_FAILURE) and blocks dependent criteria. All subsystem tests passed. Full regression passed (254 tests total) with 0 warnings (`pytest -W error`).
+- **Artifact**: Phase_11_Verification_Validation_2.zip generated.
+
+### 2026-08-11 — Phase 11: Verification & Validation (Correction #3)
+- **Status**: Completed
+- **Corrections Applied**: Fixed dependency checking and exception boundary in `execute_verification`. Dependency evaluation now strictly occurs *before* Runner invocation, ensuring dependency-blocked criteria are not executed. Distinct exception boundaries were established to explicitly convert Runner failures to `TOOL_FAILURE` while enabling `VerificationResultEvaluator` logic failures to propagate without being swallowed.
+- **Tests**: Added tests for Evaluator exceptions not being swallowed and dependency blocking avoiding runner invocation. All subsystem tests passed. Full regression passed (255 tests total) with 0 warnings (`pytest -W error`).
+- **Artifact**: Phase_11_Verification_Validation_3.zip generated.
