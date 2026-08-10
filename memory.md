@@ -52,3 +52,11 @@ See update.md for full history.
 - **Session Persistence**: Implemented via simple JSON local files. No distributed DBs.
 - **Subagent Interface**: Handled via SubagentEngine isolating state mutation and bounding objectives.
 - **Workflow Boundaries**: Workflow replanning is pushed to boundary signals (EngineEvent.REPLANNING_STARTED), rather than executed within the EngineeringEngine.
+
+## Repository State
+- **Current**: Phase 10 (Interaction Layer) Correction #1 completed. Awaiting authorization for Phase 11.
+- **Completed**: Phase 1 (Core), Phase 2 (Gateway), Phase 3 (Permissions), Phase 4 (Tools), Phase 5 (Skills), Phase 6 (Context Engine), Phase 7 (Engineering Engine), Phase 8 (Workflow Planning), Phase 9 (Execution State), Phase 10 (Interaction Layer)
+- **Phase 10 Correction**: Fixed InteractionMode to match PRD §16 (PLAN/IMPLEMENT/REVIEW/DEBUG), added all V1 commands per PRD §11, fixed malformed-command handling per PRD §13.
+- **Phase 10 Test Count**: 26 interaction tests, 229 total, 0 warnings.
+- **Phase 11 (Testing & Verification)**: PENDING.
+- **Phase 12 (Integration/V1)**: PENDING.

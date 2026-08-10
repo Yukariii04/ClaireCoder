@@ -16,3 +16,4 @@ venv/
 *.zip
 clairecoder_*.md
 phase_*.md
+*.txt

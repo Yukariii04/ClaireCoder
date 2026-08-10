@@ -146,3 +146,21 @@
 - **Implemented**: Eliminated all 213 warnings from the test suite. Addressed `DeprecationWarning` for `datetime.utcnow()` by migrating to timezone-aware UTC representations in `ExecutionManager` and `Task` types. Addressed `ResourceWarning` for unclosed files in `test_workflow.py` and unclosed `HTTPError` responses in `OpenAICompatibleAdapter`.
 - **Tests**: Verified full suite passing with 0 warnings (`pytest -W error`), including all isolated subsystem tests and full regressions (203 tests).
 - **Artifact**: Phase_9_Execution_State_2.zip generated.
+
+### 2026-08-10 — Phase 10: Interaction Layer
+- **Status**: Completed
+- **Implemented**: Created Interaction Layer boundary (`src/clairecoder/interaction/`) with `InteractionMode`, `CommandCategory`, `CommandParser`, and `InteractionController`. Controller handles explicit commands (`/help`, `/mode`, `/status`, `/pause`, `/resume`, `/cancel`) and delegates natural language requests to `EngineeringEngine`. Boundary is strictly enforced: Controller does not execute tools, manage permissions, or instantiate SDKs directly.
+- **Tests**: `test_interaction.py` implemented. All isolated subsystem tests passed (8 items). Full regression passed (211 tests total) with 0 warnings (`pytest -W error`).
+- **Artifact**: Phase_10_Interaction_Layer.zip generated.
+
+### 2026-08-11 — Phase 10: Interaction Layer (Correction #1)
+- **Status**: Completed
+- **Defects Found & Corrected**:
+  1. **Wrong Mode Enum**: `InteractionMode` had `BUILD` and `RESEARCH` (from ADR candidates). PRD §16 is authoritative and specifies PLAN, IMPLEMENT, REVIEW, DEBUG only. Corrected to match PRD.
+  2. **Wrong Default Mode**: Controller defaulted to `BUILD`. Corrected to `IMPLEMENT` per PRD §16.
+  3. **Missing V1 Commands**: PRD §11 mandates `/help`, `/status`, `/plan`, `/session`, `/mode`, `/pause`, `/resume`, `/cancel`, `/clear`, `/exit`. Previous implementation was missing `/plan`, `/session`, `/clear`, `/exit`. All four added.
+  4. **Missing Command Categories**: PRD §10 requires Workflow and Task categories. Added `WORKFLOW` and `TASK` to `CommandCategory` enum.
+  5. **Parser Silently Dropped Malformed Commands**: Bare "/" was returned as `None`, causing it to be treated as natural language. PRD §13 requires clear errors for malformed commands. Parser now returns a `CommandRequest` with empty command so controller can produce an explicit error.
+  6. **Parser Had No Error Handling**: `shlex.split` could raise `ValueError` on malformed quoting. Added try/except fallback.
+- **Tests**: Expanded from 8 to 26 tests. Added regression tests for every defect. All 10 subsystems pass independently. Full regression: 229 passed, 0 failures, 0 errors, 0 warnings (`pytest -W error`).
+- **Artifact**: Phase_10_Interaction_Layer_1.zip generated.
