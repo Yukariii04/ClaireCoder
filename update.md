@@ -187,3 +187,57 @@
 - **Corrections Applied**: Fixed dependency checking and exception boundary in `execute_verification`. Dependency evaluation now strictly occurs *before* Runner invocation, ensuring dependency-blocked criteria are not executed. Distinct exception boundaries were established to explicitly convert Runner failures to `TOOL_FAILURE` while enabling `VerificationResultEvaluator` logic failures to propagate without being swallowed.
 - **Tests**: Added tests for Evaluator exceptions not being swallowed and dependency blocking avoiding runner invocation. All subsystem tests passed. Full regression passed (255 tests total) with 0 warnings (`pytest -W error`).
 - **Artifact**: Phase_11_Verification_Validation_3.zip generated.
+
+### 2026-08-11 — Phase 12: Integration & V1 Completion
+- **Status**: Completed
+- **Implemented**: Created `src/clairecoder/app.py` providing the top-level `ClaireCoderV1` API boundary with minimal required public methods (`create_session`, `run`, `status`, etc). Hooked up `WorkflowManager`, `ExecutionManager`, `VerificationEngine`, and `InteractionController` with the core `EngineeringEngine`. Added Integration End-to-End Tests validating the pipeline functionality. Maintained full decoupling and preserved architectural constraints required by CC-PRD-010.
+- **Tests**: 100% test coverage passed with 0-warning baseline (261 tests total).
+- **Artifact**: Phase_12_Integration_V1_Completion.zip generated.
+
+### 2026-08-11 — Phase 12 Correction #2
+- **Status**: Completed
+- **Implemented**: Addressed architectural boundary violations in V1 Integration (`app.py`). Enforced explicit Translation Boundary between `WorkflowTask` and `ExecutionTask`. Fixed bypasses in `app.py` for task state evaluation by utilizing `WorkflowManager.check_completion()`. Replaced private attribute mutation with proper public accessors (`load_workflow_from_dict`, `remove_workflow`, `remove_session`).
+- **Tests**: Maintained 100% test pass rate with 0 warnings (261 tests total).
+- **Artifact**: Phase_12_Integration_V1_Completion_3.zip generated.
+
+### 2026-08-14 — Phase 12 Correction #3
+- **Status**: Completed
+- **Implemented**: Addressed remaining V1 integration gaps. Restored task sequencing logic to `WorkflowManager.get_ready_tasks()`. Fixed workflow state transitions to correctly route through `FAILED` before `REPLANNING`. Repaired session persistence to comprehensively serialize plan history, execution state, and verification history through public APIs instead of private properties.
+- **Tests**: Added specific integration tests for Execution Failure Replanning and Verification Failure Replanning boundaries. Maintained 100% test coverage with 0 warnings (263 tests total).
+- **Artifact**: Phase_12_Integration_V1_Completion_4.zip generated.
+
+### 2026-08-14 — Phase 12 Correction #4
+- **Status**: Completed
+- **Implemented**: Completely proved the V1 failure/recovery lifecycle end-to-end. Rewrote the `run()` method in `app.py` into a robust `while` loop that handles the full workflow recovery cycle (FAILED -> REPLANNING -> PLANNED -> ACTIVE). Ensured execution state and verification failure properly cascade into workflow recovery without any duplicate retry logic outside of the authoritative subsystems.
+- **Tests**: Rewrote replanning integration tests to cycle completely through a failure and verify successful secondary execution and objective completion. (263 tests total, 0 warnings).
+- **Artifact**: Phase_12_Integration_V1_Completion_4.zip generated.
+
+### 2026-08-14 — Phase 12 Correction #5
+- **Status**: Completed
+- **Implemented**: Refactored `app.py` into a clean integration boundary, fully stripping out duplicate business logic orchestrations. Delegated Plan generation entirely to `Planner` and state transition validation to `WorkflowManager` and `VerificationEngine`. `app.py` no longer directly instantiates Plans, Tasks, or fabricates criteria logic, aligning exactly with CC-PRD-010 boundaries.
+- **Tests**: Updated integration tests to properly mock planning requests to validate the integrated lifecycle. Maintained 100% test coverage with 0 warnings (263 tests total).
+- **Artifact**: Phase_12_Integration_V1_Completion_5.zip generated.
+
+### 2026-08-14 — Phase 12 Correction #6
+- **Status:** COMPLETED
+- **Description:** Final architectural gap resolution for Phase 12 integration. Addressed missing semantic data propagation and session persistence integration gaps.
+- **Key Changes:**
+  - Propagated `Task.validation_requirements` into `VerificationCriterion` objects upon verification initiation in `app.py`.
+  - Fixed `VerificationHistory` minimal persistence mapping which erroneously accessed non-existent `error` attribute.
+  - Propagated `Plan.completion_criteria` and `Plan.validation_strategy` into the `Workflow` completion boundary before completion checks.
+  - Replaced internal engineering session save/resume tests with `test_application_level_session_persistence_and_resumption` traversing the public `ClaireCoderV1` API.
+  - Added new integration tests spanning task validation, workflow completion criteria, and overall semantic data propagation across the sub-systems.
+- **Outcome:** The `ClaireCoderV1` boundary correctly functions as an orchestrator honoring domain rules managed by its engines. 267 integration tests pass. Architecture meets V1 standards.
+- **Artifact**: Phase_12_Integration_V1_Completion_6.zip generated.
+
+### 2026-08-14 — Phase 12 Correction #7
+- **Status:** COMPLETED
+- **Description:** Full Verification state persistence. Previously, `VerificationHistory.to_dict/from_dict` only preserved top-level metadata (id, status, attempt_number) and silently discarded criteria, evidence, and criterion_results. This correction implements complete round-trip serialization of all CC-PRD-009 §7 fields.
+- **Key Changes:**
+  - Rewrote `history.py` serialization to preserve all `Verification` fields: criteria, evidence, criterion_results, timestamps, failure_category, attempt/retry state.
+  - Added dedicated serialize/deserialize helpers for `VerificationCriterion`, `Evidence`, `VerificationTestResult`, `CriterionResult`, and `Verification`.
+  - Deserialization rejects malformed records (missing `verification_id`, `task_id`, or `status`) with `ValueError` instead of silently substituting empty state.
+  - Strengthened the application-level persistence integration test to compare deep verification state (criteria, evidence, criterion_results) after `save_session` / `resume_session`.
+  - Added 13 new verification round-trip tests covering every serialization layer.
+- **Tests:** 280 passed, 0 failures, 0 errors, 0 warnings. All 11 subsystems pass independently.
+- **Artifact**: Phase_12_Integration_V1_Completion_7.zip generated.

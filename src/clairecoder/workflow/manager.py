@@ -10,7 +10,6 @@ Those responsibilities remain with the EngineeringEngine.
 
 from typing import Any, Dict, List, Optional
 
-from clairecoder.engine.types import Task, TaskState
 from .types import (
     Workflow,
     WorkflowState,
@@ -18,6 +17,8 @@ from .types import (
     PlanningLevel,
     WorkflowError,
     WorkflowStateError,
+    Task,
+    TaskState,
 )
 from .dependencies import validate_dependencies, topological_order, get_ready_tasks, validate_plan_dependencies
 
@@ -162,9 +163,13 @@ class WorkflowManager:
 
         history.append(plan)
 
-        # Sync task_ids into the Workflow
+        # Sync task_ids and criteria into the Workflow
         workflow = self._workflows[wf_id]
         workflow.task_ids = list(plan.task_ids)
+        if plan.completion_criteria:
+            workflow.completion_criteria = list(plan.completion_criteria)
+        if plan.validation_strategy:
+            workflow.validation_requirements = list(plan.validation_strategy)
 
     def get_active_plan(self, workflow_id: str) -> Optional[Plan]:
         """Return the current (non-superseded) plan for a workflow."""
@@ -356,3 +361,19 @@ class WorkflowManager:
             mgr._plans[workflow.id].append(plan)
 
         return mgr
+
+    def load_workflow_from_dict(self, data: Dict[str, Any]) -> None:
+        """Restore a Workflow into this manager instance."""
+        restored_mgr = self.workflow_from_dict(data)
+        workflow_id = data["id"]
+        workflow = restored_mgr.get_workflow(workflow_id)
+        if workflow:
+            self._workflows[workflow_id] = workflow
+            self._plans[workflow_id] = restored_mgr.get_plan_history(workflow_id)
+
+    def remove_workflow(self, workflow_id: str) -> None:
+        """Remove a Workflow and its plans."""
+        if workflow_id in self._workflows:
+            del self._workflows[workflow_id]
+        if workflow_id in self._plans:
+            del self._plans[workflow_id]

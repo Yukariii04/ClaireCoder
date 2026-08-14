@@ -32,6 +32,15 @@ class WorkflowState(str, Enum):
     INTERRUPTED = "interrupted"
 
 
+class TaskState(str, Enum):
+    """Lifecycle states for a Workflow Task."""
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    BLOCKED = "blocked"
+
 # =============================================================================
 # PLANNING LEVEL  (CC-ADR-004 Section 6.2)
 # =============================================================================
@@ -77,6 +86,28 @@ class Workflow:
     context_requirements: List[str] = field(default_factory=list)
     planning_level: PlanningLevel = PlanningLevel.STRUCTURED
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+# =============================================================================
+# TASK  (CC-PRD-004 Section 8)
+# =============================================================================
+
+@dataclass
+class Task:
+    """A Workflow Task.
+    
+    CC-PRD-004 Section 8: Task representation distinct from Execution State.
+    """
+    id: str
+    objective_id: str
+    description: str
+    status: TaskState = TaskState.PENDING
+    dependencies: List[str] = field(default_factory=list)
+    expected_result: Optional[str] = None
+    validation_requirements: List[str] = field(default_factory=list)
+    context_references: List[str] = field(default_factory=list)
+    required_skills: List[str] = field(default_factory=list)
+    required_tools: List[str] = field(default_factory=list)
 
 
 # =============================================================================

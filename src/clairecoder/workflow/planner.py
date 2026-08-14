@@ -13,9 +13,8 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional
 
-from clairecoder.engine.types import Task, TaskState
 from clairecoder.gateway.types import ModelRequest, ModelResponse
-from .types import Plan, PlanningLevel, PlanningError
+from .types import Plan, PlanningLevel, PlanningError, Task, TaskState
 from .dependencies import validate_plan_dependencies
 
 

@@ -8,11 +8,12 @@ Validates dependency existence, invalid references, ordering, and cycles.
 
 from typing import Dict, List, Set
 
-from clairecoder.engine.types import Task
 from .types import (
     DependencyCycleError,
     DependencyNotFoundError,
     InvalidDependencyError,
+    Task,
+    TaskState,
 )
 
 
@@ -108,7 +109,7 @@ def get_ready_tasks(tasks: List[Task]) -> List[Task]:
     CC-PRD-004 Section 9: A dependent Task SHALL not become executable
     until its required dependencies are satisfied.
     """
-    from clairecoder.engine.types import TaskState
+    # Removed duplicate inner import since it's now at module level
 
     completed_ids: Set[str] = {
         t.id for t in tasks if t.status == TaskState.SUCCEEDED

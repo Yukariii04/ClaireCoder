@@ -47,12 +47,11 @@ class EngineeringSession:
                     "description": t.description,
                     "status": t.status.value,
                     "dependencies": t.dependencies,
-                    "affected_areas": t.affected_areas,
-                    "required_capabilities": t.required_capabilities,
+                    "expected_result": t.expected_result,
                     "required_skills": t.required_skills,
+                    "required_tools": t.required_tools,
                     "validation_requirements": t.validation_requirements,
-                    "result": t.result,
-                    "failure_state": t.failure_state
+                    "context_references": t.context_references
                 } for tid, t in self.tasks.items()
             },
             "current_workflow": self.current_workflow,
@@ -89,12 +88,11 @@ class EngineeringSession:
                 description=t_data["description"],
                 status=TaskState(t_data["status"]),
                 dependencies=t_data.get("dependencies", []),
-                affected_areas=t_data.get("affected_areas", []),
-                required_capabilities=t_data.get("required_capabilities", []),
+                expected_result=t_data.get("expected_result"),
                 required_skills=t_data.get("required_skills", []),
+                required_tools=t_data.get("required_tools", []),
                 validation_requirements=t_data.get("validation_requirements", []),
-                result=t_data.get("result"),
-                failure_state=t_data.get("failure_state")
+                context_references=t_data.get("context_references", [])
             )
             
         session.current_workflow = data.get("current_workflow")
@@ -239,6 +237,11 @@ class EngineeringEngine:
         """Retrieve an existing session."""
         return self._sessions.get(session_id)
 
+    def remove_session(self, session_id: str) -> None:
+        """Remove a session from memory."""
+        if session_id in self._sessions:
+            del self._sessions[session_id]
+
     # =========================================================================
     # SUBAGENT BOUNDARY
     # =========================================================================
@@ -350,14 +353,20 @@ class EngineeringEngine:
         self._emit(EngineEvent.TOOL_COMPLETED, {"tool_id": tool_id, "state": result.state})
         return result
 
-    def interaction_loop(self, session_id: str, task_id: str, max_iterations: int = 5) -> None:
+    def interaction_loop(self, session_id: str, task_id: str, max_iterations: int = 5) -> "ExecutionResult":
         """A complete Phase 7 Model Interaction Loop (Model -> Tool -> Result -> Model).
         
         Tool results must not be discarded. They are fed back into the next model request.
         """
+        from clairecoder.execution.types import ExecutionResult, ExecutionResultCategory, FailureCategory
+        
         session = self.get_session(session_id)
         if not session or task_id not in session.tasks:
-            return
+            return ExecutionResult(
+                category=ExecutionResultCategory.FAILURE,
+                failure_category=FailureCategory.UNKNOWN_FAILURE,
+                error_message="Task or session not found"
+            )
             
         task = session.tasks[task_id]
         
@@ -411,7 +420,13 @@ class EngineeringEngine:
                 interaction_history.extend(tool_results_for_history)
             else:
                 # No tools requested, model considers task done
-                break
+                return ExecutionResult(category=ExecutionResultCategory.SUCCESS)
+                
+        return ExecutionResult(
+            category=ExecutionResultCategory.TIMEOUT,
+            failure_category=FailureCategory.TIMEOUT,
+            error_message=f"Interaction loop exceeded max iterations ({max_iterations})"
+        )
 
     # =========================================================================
     # PLANNING AND STATE (BOUNDED TO PRD-001)

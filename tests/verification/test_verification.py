@@ -492,3 +492,363 @@ def test_execute_verification_requires_runner():
     
     with pytest.raises(RuntimeError, match="VerificationRunner is required"):
         engine.execute_verification("v1")
+
+
+# =============================================================================
+# ROUND-TRIP SERIALIZATION TESTS (Correction #7)
+# =============================================================================
+
+def test_criterion_roundtrip():
+    """VerificationCriterion survives serialization round-trip."""
+    from clairecoder.verification.history import _serialize_criterion, _deserialize_criterion
+    
+    original = VerificationCriterion(
+        id="c1",
+        description="Unit tests pass",
+        test_type=VerificationTestType.UNIT,
+        required=True,
+        command="pytest tests/",
+        expected_result="0 failures",
+        dependencies=["c0"],
+    )
+    serialized = _serialize_criterion(original)
+    restored = _deserialize_criterion(serialized)
+    
+    assert restored.id == original.id
+    assert restored.description == original.description
+    assert restored.test_type == original.test_type
+    assert restored.required == original.required
+    assert restored.command == original.command
+    assert restored.expected_result == original.expected_result
+    assert restored.dependencies == original.dependencies
+
+
+def test_evidence_roundtrip():
+    """Evidence survives serialization round-trip."""
+    from clairecoder.verification.history import _serialize_evidence, _deserialize_evidence
+    
+    ts = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    original = Evidence(
+        command="pytest -v",
+        exit_code=0,
+        output="10 passed",
+        error=None,
+        working_directory="/project",
+        environment_info={"python": "3.14", "os": "linux"},
+        timestamp=ts,
+        summary="All tests passed",
+    )
+    serialized = _serialize_evidence(original)
+    restored = _deserialize_evidence(serialized)
+    
+    assert restored.command == original.command
+    assert restored.exit_code == original.exit_code
+    assert restored.output == original.output
+    assert restored.error == original.error
+    assert restored.working_directory == original.working_directory
+    assert restored.environment_info == original.environment_info
+    assert restored.timestamp == original.timestamp
+    assert restored.summary == original.summary
+
+
+def test_test_result_roundtrip():
+    """VerificationTestResult survives serialization round-trip."""
+    from clairecoder.verification.history import _serialize_test_result, _deserialize_test_result
+    
+    original = VerificationTestResult(
+        test_id="t1",
+        execution_id="exec_1",
+        status=VerificationTestStatus.FAILED,
+        exit_code=1,
+        output="FAILED: test_foo",
+        error="AssertionError",
+        duration=3.5,
+    )
+    serialized = _serialize_test_result(original)
+    restored = _deserialize_test_result(serialized)
+    
+    assert restored.test_id == original.test_id
+    assert restored.execution_id == original.execution_id
+    assert restored.status == original.status
+    assert restored.exit_code == original.exit_code
+    assert restored.output == original.output
+    assert restored.error == original.error
+    assert restored.duration == original.duration
+
+
+def test_criterion_result_roundtrip():
+    """CriterionResult (with evidence and test_result) survives round-trip."""
+    from clairecoder.verification.history import _serialize_criterion_result, _deserialize_criterion_result
+    
+    ev = Evidence(command="pytest", exit_code=1, output="1 failed")
+    tr = VerificationTestResult("t1", "e1", VerificationTestStatus.FAILED, exit_code=1, error="fail")
+    
+    original = CriterionResult(
+        criterion_id="c1",
+        status=VerificationStatus.FAILED,
+        failure_category=FailureCategory.TEST_FAILURE,
+        evidence=ev,
+        test_result=tr,
+    )
+    serialized = _serialize_criterion_result(original)
+    restored = _deserialize_criterion_result(serialized)
+    
+    assert restored.criterion_id == original.criterion_id
+    assert restored.status == original.status
+    assert restored.failure_category == original.failure_category
+    assert restored.evidence.command == ev.command
+    assert restored.evidence.exit_code == ev.exit_code
+    assert restored.test_result.test_id == tr.test_id
+    assert restored.test_result.status == tr.status
+
+
+def test_criterion_result_roundtrip_no_evidence():
+    """CriterionResult without evidence or test_result survives round-trip."""
+    from clairecoder.verification.history import _serialize_criterion_result, _deserialize_criterion_result
+    
+    original = CriterionResult(
+        criterion_id="c1",
+        status=VerificationStatus.BLOCKED,
+        failure_category=FailureCategory.DEPENDENCY_FAILURE,
+    )
+    serialized = _serialize_criterion_result(original)
+    restored = _deserialize_criterion_result(serialized)
+    
+    assert restored.criterion_id == original.criterion_id
+    assert restored.status == original.status
+    assert restored.failure_category == original.failure_category
+    assert restored.evidence is None
+    assert restored.test_result is None
+
+
+def test_verification_status_roundtrip():
+    """Verification status survives round-trip for all terminal states."""
+    from clairecoder.verification.history import _serialize_verification, _deserialize_verification
+    
+    for status in [VerificationStatus.PASSED, VerificationStatus.FAILED, VerificationStatus.BLOCKED, VerificationStatus.CANCELLED]:
+        v = Verification(
+            verification_id=f"v_{status.value}",
+            task_id="t1",
+            status=status,
+        )
+        serialized = _serialize_verification(v)
+        restored = _deserialize_verification(serialized)
+        assert restored.status == status
+
+
+def test_verification_timestamp_roundtrip():
+    """Verification timestamps survive round-trip."""
+    from clairecoder.verification.history import _serialize_verification, _deserialize_verification
+    
+    started = datetime(2026, 8, 14, 10, 0, 0, tzinfo=timezone.utc)
+    completed = datetime(2026, 8, 14, 10, 5, 0, tzinfo=timezone.utc)
+    
+    v = Verification(
+        verification_id="v1",
+        task_id="t1",
+        status=VerificationStatus.PASSED,
+        started_at=started,
+        completed_at=completed,
+    )
+    serialized = _serialize_verification(v)
+    restored = _deserialize_verification(serialized)
+    
+    assert restored.started_at == started
+    assert restored.completed_at == completed
+
+
+def test_complete_verification_roundtrip():
+    """A fully-populated Verification survives complete round-trip."""
+    from clairecoder.verification.history import _serialize_verification, _deserialize_verification
+    
+    criteria = [
+        VerificationCriterion(id="c1", description="Build", test_type=VerificationTestType.BUILD, required=True),
+        VerificationCriterion(id="c2", description="Unit", test_type=VerificationTestType.UNIT, required=True, dependencies=["c1"]),
+    ]
+    ev1 = Evidence(command="make build", exit_code=0, output="OK")
+    ev2 = Evidence(command="pytest", exit_code=0, output="5 passed")
+    tr1 = VerificationTestResult("t1", "e1", VerificationTestStatus.PASSED, exit_code=0)
+    tr2 = VerificationTestResult("t2", "e1", VerificationTestStatus.PASSED, exit_code=0)
+    cr1 = CriterionResult(criterion_id="c1", status=VerificationStatus.PASSED, evidence=ev1, test_result=tr1)
+    cr2 = CriterionResult(criterion_id="c2", status=VerificationStatus.PASSED, evidence=ev2, test_result=tr2)
+    
+    started = datetime(2026, 8, 14, 10, 0, 0, tzinfo=timezone.utc)
+    completed = datetime(2026, 8, 14, 10, 1, 0, tzinfo=timezone.utc)
+    
+    original = Verification(
+        verification_id="v_full",
+        task_id="t1",
+        execution_id="exec_1",
+        criteria=criteria,
+        status=VerificationStatus.PASSED,
+        evidence=[ev1, ev2],
+        criterion_results=[cr1, cr2],
+        started_at=started,
+        completed_at=completed,
+        failure_category=None,
+        attempt_number=2,
+        max_retries=5,
+    )
+    
+    serialized = _serialize_verification(original)
+    restored = _deserialize_verification(serialized)
+    
+    assert restored.verification_id == original.verification_id
+    assert restored.task_id == original.task_id
+    assert restored.execution_id == original.execution_id
+    assert restored.status == original.status
+    assert restored.started_at == original.started_at
+    assert restored.completed_at == original.completed_at
+    assert restored.attempt_number == original.attempt_number
+    assert restored.max_retries == original.max_retries
+    assert restored.failure_category == original.failure_category
+    
+    # Criteria round-trip
+    assert len(restored.criteria) == 2
+    assert restored.criteria[0].id == "c1"
+    assert restored.criteria[0].test_type == VerificationTestType.BUILD
+    assert restored.criteria[1].id == "c2"
+    assert restored.criteria[1].dependencies == ["c1"]
+    
+    # Evidence round-trip
+    assert len(restored.evidence) == 2
+    assert restored.evidence[0].command == "make build"
+    assert restored.evidence[1].output == "5 passed"
+    
+    # Criterion results round-trip
+    assert len(restored.criterion_results) == 2
+    assert restored.criterion_results[0].criterion_id == "c1"
+    assert restored.criterion_results[0].status == VerificationStatus.PASSED
+    assert restored.criterion_results[0].test_result.test_id == "t1"
+    assert restored.criterion_results[1].criterion_id == "c2"
+    assert restored.criterion_results[1].evidence.command == "pytest"
+
+
+def test_verification_history_complete_roundtrip():
+    """Complete VerificationHistory round-trip with multiple verifications."""
+    history = VerificationHistory()
+    
+    c1 = VerificationCriterion(id="c1", description="Test", test_type=VerificationTestType.UNIT)
+    ev = Evidence(command="pytest", exit_code=0)
+    tr = VerificationTestResult("t1", "e1", VerificationTestStatus.PASSED, 0)
+    cr = CriterionResult(criterion_id="c1", status=VerificationStatus.PASSED, evidence=ev, test_result=tr)
+    
+    v1 = Verification(
+        verification_id="v1",
+        task_id="task_1",
+        criteria=[c1],
+        status=VerificationStatus.PASSED,
+        evidence=[ev],
+        criterion_results=[cr],
+    )
+    v2 = Verification(
+        verification_id="v2",
+        task_id="task_1",
+        status=VerificationStatus.FAILED,
+        failure_category=FailureCategory.TEST_FAILURE,
+    )
+    v3 = Verification(
+        verification_id="v3",
+        task_id="task_2",
+        status=VerificationStatus.BLOCKED,
+    )
+    
+    history.record(v1)
+    history.record(v2)
+    history.record(v3)
+    
+    serialized = history.to_dict()
+    restored_history = VerificationHistory.from_dict(serialized)
+    
+    # All verifications survive
+    assert restored_history.get_verification("v1") is not None
+    assert restored_history.get_verification("v2") is not None
+    assert restored_history.get_verification("v3") is not None
+    
+    # Task history index survives
+    assert len(restored_history.get_history("task_1")) == 2
+    assert len(restored_history.get_history("task_2")) == 1
+    
+    # Deep state survives
+    rv1 = restored_history.get_verification("v1")
+    assert rv1.status == VerificationStatus.PASSED
+    assert len(rv1.criteria) == 1
+    assert rv1.criteria[0].description == "Test"
+    assert len(rv1.evidence) == 1
+    assert rv1.evidence[0].command == "pytest"
+    assert len(rv1.criterion_results) == 1
+    assert rv1.criterion_results[0].test_result.status == VerificationTestStatus.PASSED
+    
+    rv2 = restored_history.get_verification("v2")
+    assert rv2.failure_category == FailureCategory.TEST_FAILURE
+
+
+def test_engine_serialization_roundtrip():
+    """VerificationEngine to_dict / load_from_dict round-trip."""
+    engine = VerificationEngine()
+    criteria = [
+        VerificationCriterion(id="c1", description="Test", test_type=VerificationTestType.UNIT),
+    ]
+    engine.create_verification("v1", "t1", criteria)
+    engine.start_verification("v1")
+    engine.submit_criterion_result(
+        "v1", "c1",
+        test_result=VerificationTestResult("t1", "e1", VerificationTestStatus.PASSED, 0),
+        evidence=Evidence(command="pytest", exit_code=0, output="passed"),
+    )
+    engine.evaluate_verification("v1")
+    
+    serialized = engine.to_dict()
+    
+    engine2 = VerificationEngine()
+    engine2.load_from_dict(serialized)
+    
+    rv1 = engine2.get_verification("v1")
+    assert rv1 is not None
+    assert rv1.status == VerificationStatus.PASSED
+    assert len(rv1.criteria) == 1
+    assert rv1.criteria[0].id == "c1"
+    assert len(rv1.evidence) == 1
+    assert rv1.evidence[0].command == "pytest"
+    assert len(rv1.criterion_results) == 1
+    assert rv1.criterion_results[0].status == VerificationStatus.PASSED
+
+
+def test_malformed_verification_missing_required_field():
+    """Malformed persisted Verification with missing required field is rejected."""
+    from clairecoder.verification.history import _deserialize_verification
+    
+    # Missing verification_id
+    with pytest.raises(ValueError, match="missing required field 'verification_id'"):
+        _deserialize_verification({"task_id": "t1", "status": "passed"})
+    
+    # Missing task_id
+    with pytest.raises(ValueError, match="missing required field 'task_id'"):
+        _deserialize_verification({"verification_id": "v1", "status": "passed"})
+    
+    # Missing status
+    with pytest.raises(ValueError, match="missing required field 'status'"):
+        _deserialize_verification({"verification_id": "v1", "task_id": "t1"})
+
+
+def test_malformed_verification_invalid_status():
+    """Malformed persisted Verification with invalid status value is rejected."""
+    from clairecoder.verification.history import _deserialize_verification
+    
+    with pytest.raises(ValueError):
+        _deserialize_verification({
+            "verification_id": "v1",
+            "task_id": "t1",
+            "status": "not_a_real_status",
+        })
+
+
+def test_malformed_history_from_dict():
+    """VerificationHistory.from_dict rejects malformed records."""
+    with pytest.raises(ValueError):
+        VerificationHistory.from_dict({
+            "verifications": {
+                "v1": {"task_id": "t1", "status": "passed"}  # missing verification_id
+            }
+        })
+

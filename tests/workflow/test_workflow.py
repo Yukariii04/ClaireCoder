@@ -22,6 +22,8 @@ from clairecoder.workflow.types import (
     DependencyNotFoundError,
     InvalidDependencyError,
     PlanningError,
+    Task,
+    TaskState,
 )
 from clairecoder.workflow.manager import WorkflowManager
 from clairecoder.workflow.planner import Planner
@@ -31,8 +33,6 @@ from clairecoder.workflow.dependencies import (
     get_ready_tasks,
 )
 from clairecoder.engine.types import (
-    Task,
-    TaskState,
     EngineeringObjective,
     EngineEvent,
 )

@@ -21,7 +21,7 @@ class EngineeringObjective:
     workflow_id: Optional[str] = None
     completion_criteria: List[str] = field(default_factory=list)
 
-from clairecoder.execution.types import Task, TaskState
+from clairecoder.workflow.types import Task, TaskState
 
 class EngineEvent(str, Enum):
     OBJECTIVE_STARTED = "objective_started"

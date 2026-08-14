@@ -13,7 +13,7 @@ Architectural boundaries (§3, §54):
 - Does NOT create unlimited retry loops (§38).
 - Model claims are NOT verification evidence (§24).
 """
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
 
 from .types import (
@@ -281,3 +281,16 @@ class VerificationEngine:
         if not v:
             raise ValueError(f"Verification {verification_id} not found")
         return v
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the verification engine state for persistence."""
+        return {
+            "max_retries": self._max_retries,
+            "history": self._history.to_dict(),
+        }
+        
+    def load_from_dict(self, data: Dict[str, Any]) -> None:
+        """Restore the verification engine state from serialized data."""
+        self._max_retries = data.get("max_retries", self._max_retries)
+        if "history" in data:
+            self._history = VerificationHistory.from_dict(data["history"])
