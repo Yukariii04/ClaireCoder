@@ -6,153 +6,184 @@
 #
 # Document Number : CC-ADR-002
 # Title           : Model Gateway & Provider Architecture
-# Version         : 1.0.0
-# Status          : Accepted
+# Version         : 2.0.0
+# Status          : FINAL
 #
 ###############################################################################
+
 
 # 1. Decision Summary
 
 ClaireCoder SHALL use a dedicated Model Gateway as the only model-execution
-boundary between the Engineering Engine and external or local models.
+boundary between the Engineering Engine and external, local, self-hosted, or
+routed models.
 
 The Model Gateway SHALL support:
 
-- native provider adapters,
-- OpenAI-compatible endpoints,
-- local inference runtimes,
-- model routers,
-- custom endpoints.
+    - native provider adapters,
+    - protocol-compatible adapters,
+    - OpenAI-compatible endpoints,
+    - local inference runtimes,
+    - self-hosted gateways,
+    - model routers,
+    - custom endpoints.
 
 The Engineering Engine SHALL NOT contain provider-specific API logic.
 
 ClaireCoder SHALL distinguish:
 
-- Model,
-- Provider,
-- Endpoint,
-- Runtime,
-- Router,
-- Model Profile.
+    - Model,
+    - Provider,
+    - Adapter,
+    - Endpoint,
+    - Runtime,
+    - Router,
+    - Provider Profile,
+    - Model Profile.
 
 The Model Gateway SHALL expose normalized model capabilities while preserving
 provider-specific options through an extension mechanism.
 
-ClaireCoder SHALL support both single-model and multi-model operation.
+ClaireCoder SHALL support:
+
+    - single-model operation,
+    - multi-model operation,
+    - multi-provider operation,
+    - local/cloud coexistence.
 
 A user SHALL NOT be required to have access to multiple paid model providers.
 
 Local models SHALL be first-class citizens of the architecture.
 
+
 -------------------------------------------------------------------------------
 
 # 2. Context
 
-CC-RES-005 established that modern models can be accessed through very
-different interfaces.
+Modern models can be accessed through substantially different interfaces.
 
 Examples include:
 
-- native provider APIs,
-- OpenAI-compatible APIs,
-- local inference servers,
-- model routers,
-- custom endpoints.
+    - native provider APIs,
+    - OpenAI-compatible APIs,
+    - Anthropic-compatible APIs,
+    - local inference servers,
+    - self-hosted gateways,
+    - model routers,
+    - custom endpoints.
 
-The same model may also be available through multiple providers or runtimes.
+The same logical Model may also be accessible through different Providers,
+Endpoints, Runtimes, or Routers.
 
 Provider APIs differ in:
 
-- authentication,
-- Tool calling,
-- reasoning controls,
-- structured output,
-- vision,
-- streaming,
-- context limits,
-- response formats,
-- provider-specific parameters.
+    - authentication,
+    - Tool calling,
+    - reasoning controls,
+    - structured output,
+    - vision,
+    - streaming,
+    - context limits,
+    - request formats,
+    - response formats,
+    - provider-specific parameters.
 
-A simple abstraction such as:
+The OpenAI-compatible protocol is useful, but it is NOT the universal
+provider architecture.
 
-    send(prompt) -> response
+The system therefore requires:
 
-would therefore be insufficient for ClaireCoder.
+    Protocol compatibility
+        +
+    Native provider support
+        +
+    Local runtime support
+        +
+    Router support.
 
-At the same time, embedding every provider-specific difference directly into
-the Engineering Engine would make the entire system difficult to maintain.
+The Model Gateway SHALL isolate these differences without forcing the
+Engineering Engine to understand them.
 
-A dedicated Model Gateway is therefore required.
 
 -------------------------------------------------------------------------------
 
 # 3. Problem
 
 Without a dedicated Model Gateway, ClaireCoder would become tightly coupled
-to individual providers.
+to individual providers and execution systems.
 
-For example:
+An unsuitable architecture would resemble:
 
-Engineering Engine
-    ↓
-OpenAI API
-    ↓
-Anthropic API
-    ↓
-Gemini API
-    ↓
-Ollama API
-    ↓
-OpenRouter API
+    Engineering Engine
+        ↓
+    OpenAI API
+        ↓
+    Anthropic API
+        ↓
+    Gemini API
+        ↓
+    Ollama API
+        ↓
+    OpenRouter API
+        ↓
+    OmniRoute
 
-This would cause provider-specific logic to spread throughout the system.
+This would spread provider-specific logic throughout the system.
 
 It would also make it difficult to:
 
-- add a new provider,
-- replace a provider,
-- use a local model,
-- use a custom endpoint,
-- route between providers,
-- detect capabilities,
-- implement model fallback,
-- maintain single-model operation.
+    - add a new provider,
+    - replace a provider,
+    - use a local model,
+    - use a self-hosted gateway,
+    - use a custom endpoint,
+    - route between providers,
+    - detect capabilities,
+    - implement fallback,
+    - maintain single-model operation,
+    - maintain multiple provider configurations.
 
-The architecture therefore requires one stable model-execution boundary.
+The architecture therefore requires one stable Model Gateway boundary.
+
 
 -------------------------------------------------------------------------------
 
 # 4. Decision
 
-ClaireCoder SHALL implement the following conceptual architecture:
+ClaireCoder SHALL implement:
 
-                        ENGINEERING ENGINE
-                                │
-                                ▼
-                         MODEL GATEWAY
-                                │
-             ┌──────────────────┼──────────────────┐
-             │                  │                  │
-             ▼                  ▼                  ▼
-      Native Providers    Compatibility Layer   Router Layer
-             │                  │                  │
-       ┌─────┼─────┐            │             OpenRouter
-       │     │     │            │             Future Routers
-       ▼     ▼     ▼            ▼
-     OpenAI Anthropic Gemini   OpenAI-Compatible
-       │      │      │         Endpoints
-       │      │      │            │
-       │      │      │       ┌────┼────┐
-       │      │      │       ▼    ▼    ▼
-       │      │      │     Ollama LM   vLLM
-       │      │      │          Studio
-       │      │      │
-       └──────┴──────┴───────────────────────────┐
-                                                  │
-                                                  ▼
-                                        MODEL EXECUTION
+                              ENGINEERING ENGINE
+                                     │
+                                     ▼
+                              MODEL GATEWAY
+                                     │
+                    ┌────────────────┼────────────────┐
+                    │                │                │
+                    ▼                ▼                ▼
+                Provider          Adapter          Profile
+                Registry          Registry          Registry
+                    │                │
+          ┌─────────┼─────────┐      │
+          │         │         │      │
+          ▼         ▼         ▼      ▼
+       Native     Native    Native  Compatible
+       Adapter    Adapter   Adapter  Adapter
+          │         │         │      │
+       Anthropic  Gemini   Future   OpenAI-Compatible
+                                  │
+              ┌───────────────────┼─────────────────────┐
+              │         │         │         │           │
+             Groq     OpenAI   OpenRouter OmniRoute   Local
+                                                       │
+                                              ┌────────┼────────┐
+                                              │        │        │
+                                            Ollama   LM Studio vLLM
 
 The Engineering Engine SHALL communicate only with the Model Gateway.
+
+The Engineering Engine SHALL never communicate directly with a Provider,
+Runtime, Router, or Adapter implementation.
+
 
 -------------------------------------------------------------------------------
 
@@ -162,923 +193,1157 @@ ClaireCoder SHALL distinguish a logical Model from its execution source.
 
 A Model represents the model requested by the Engineering Engine.
 
-Examples:
+A Model MAY reference:
 
-- a specific OpenAI model,
-- a specific Anthropic model,
-- a Gemini model,
-- a local model,
-- a routed model.
+    - model identifier,
+    - display name,
+    - Provider,
+    - Adapter,
+    - Endpoint,
+    - Runtime,
+    - Router,
+    - capabilities,
+    - context capacity,
+    - reasoning support,
+    - configuration metadata.
 
-The model identifier SHALL NOT by itself determine the provider.
+The Model identifier SHALL NOT by itself determine the Provider, Endpoint,
+Runtime, Router, or Adapter.
 
--------------------------------------------------------------------------------
-
-# 6. Provider
-
-A Provider represents the service responsible for exposing the model.
-
-Examples include:
-
-- OpenAI,
-- Anthropic,
-- Google,
-- DeepSeek,
-- Groq,
-- OpenRouter,
-- a custom provider.
-
-A Provider MAY expose multiple models.
 
 -------------------------------------------------------------------------------
 
-# 7. Endpoint
+# 6. Provider Identity
 
-An Endpoint represents the actual API address through which ClaireCoder
-communicates with a model.
+A Provider represents the service, vendor, gateway, or model-serving system
+exposing one or more Models.
 
-For example:
+The initial supported Provider/Runtime ecosystem SHALL include:
 
-Hosted provider endpoint
-    ↓
-https://provider.example/api
+    Hosted / Cloud:
 
-Local endpoint
-    ↓
-http://localhost:PORT
+        - Groq
+        - OpenAI
+        - Anthropic
+        - Google Gemini
+        - OpenRouter
 
-Custom endpoint
-    ↓
-user-defined base URL
+    Local / Self-Hosted:
 
-The endpoint SHALL be configurable independently from the logical model.
+        - Ollama
+        - LM Studio
+        - vLLM
+        - OmniRoute
 
--------------------------------------------------------------------------------
+    Custom:
 
-# 8. Runtime
+        - user-defined Providers / Endpoints.
 
-A Runtime represents the environment executing the model.
+A Provider MAY expose multiple Models.
 
-Examples include:
+Provider identity SHALL remain separate from protocol compatibility.
 
-- cloud inference,
-- Ollama,
-- LM Studio,
-- vLLM,
-- another self-hosted runtime.
-
-The Runtime is therefore distinct from the Provider.
-
-A user may run a model locally without a traditional hosted Provider.
 
 -------------------------------------------------------------------------------
 
-# 9. Router
+# 7. Adapter Identity
 
-A Router represents an intermediary that determines where model execution
-should occur.
+An Adapter represents the communication implementation translating between the
+normalized Model Gateway contract and an execution API.
 
-A router MAY provide:
+The architecture SHALL support:
 
-- provider selection,
-- fallback,
-- latency optimization,
-- cost optimization,
-- availability routing,
-- capability routing.
+    Native Adapters
 
-A Router SHALL remain separate from the logical Model identity.
+        - Anthropic
+        - Gemini
+        - future native Providers
 
-ClaireCoder SHALL support routers without making routing mandatory.
+    Compatibility Adapters
 
--------------------------------------------------------------------------------
+        - OpenAI-compatible
+        - Anthropic-compatible where applicable
+        - future compatibility families
 
-# 10. Model Profile
+An Adapter SHALL NOT own Engineering Engine orchestration.
 
-ClaireCoder SHALL introduce the concept of a Model Profile.
+An Adapter SHALL only translate and normalize provider/runtime interaction.
 
-A Model Profile MAY define:
-
-- preferred model,
-- provider,
-- endpoint,
-- reasoning level,
-- fallback model,
-- capability requirements,
-- latency preference,
-- cost preference.
-
-The profile SHALL be a user-facing configuration abstraction.
-
-It SHALL NOT replace the underlying Model Gateway entities.
 
 -------------------------------------------------------------------------------
 
-# 11. Provider Adapter Architecture
+# 8. Provider / Adapter Separation
 
-The Model Gateway SHALL use provider adapters.
-
-The conceptual structure SHALL be:
-
-Model Gateway
-     │
-     ├── Native Provider Adapter
-     │      ├── OpenAI
-     │      ├── Anthropic
-     │      ├── Gemini
-     │      ├── DeepSeek
-     │      └── Other Providers
-     │
-     ├── Compatibility Adapter
-     │      └── OpenAI-Compatible
-     │
-     ├── Router Adapter
-     │      └── OpenRouter / Future Routers
-     │
-     └── Custom Adapter
-            └── User-defined Endpoint
-
-Each adapter SHALL translate between the Model Gateway interface and the
-provider-specific interface.
-
--------------------------------------------------------------------------------
-
-# 12. Native Providers
-
-ClaireCoder SHOULD support native adapters where provider-specific APIs expose
-important capabilities that cannot be represented reliably through a generic
-compatibility API.
-
-Initial providers SHALL be considered for native integration based on:
-
-- capability,
-- adoption,
-- API stability,
-- usefulness to coding workflows.
-
-The initial architecture SHALL not hard-code a permanently closed provider
-list.
-
-New providers SHALL be addable through the adapter mechanism.
-
--------------------------------------------------------------------------------
-
-# 13. OpenAI-Compatible Adapter
-
-ClaireCoder SHALL provide a generic OpenAI-compatible adapter.
-
-This is particularly important because many hosted and local systems expose
-OpenAI-compatible interfaces.
-
-The adapter SHALL support configuration of:
-
-- base URL,
-- API key where required,
-- model identifier,
-- optional headers,
-- capability metadata,
-- compatible request parameters.
-
-The adapter SHALL be usable for:
-
-- hosted providers,
-- local runtimes,
-- self-hosted inference servers,
-- custom endpoints.
-
-ClaireCoder SHALL not require a dedicated adapter for every OpenAI-compatible
-service.
-
--------------------------------------------------------------------------------
-
-# 14. Local Model Support
-
-Local inference SHALL be first-class.
-
-The initial architecture SHALL support systems such as:
-
-- Ollama,
-- LM Studio,
-- vLLM,
-- other compatible local servers.
-
-Local models SHALL use the same Model Gateway abstraction as hosted models.
-
-Conceptually:
-
-Local Model
-    ↓
-Local Runtime
-    ↓
-Model Adapter
-    ↓
-Model Gateway
-    ↓
-Engineering Engine
-
-The Engineering Engine SHALL not need to know whether a model is local or
-remote.
-
--------------------------------------------------------------------------------
-
-# 15. Custom Endpoints
-
-Users SHALL be able to configure custom model endpoints.
-
-A custom endpoint MAY specify:
-
-- endpoint URL,
-- API format,
-- model identifier,
-- authentication,
-- headers,
-- capability declarations,
-- optional provider-specific parameters.
-
-Custom endpoints SHALL not require modification of ClaireCoder source code.
-
--------------------------------------------------------------------------------
-
-# 16. Model Capabilities
-
-The Model Gateway SHALL expose capabilities separately from model identity.
-
-Capabilities MAY include:
-
-- text generation,
-- Tool calling,
-- parallel Tool calling,
-- structured output,
-- JSON schema,
-- vision,
-- reasoning,
-- streaming,
-- long context,
-- embeddings,
-- audio,
-- code execution.
-
-A model SHALL only be considered capable when the actual selected model and
-execution path support the capability.
-
-Provider-level capability declarations SHALL not automatically be applied to
-every model.
-
--------------------------------------------------------------------------------
-
-# 17. Capability Negotiation
-
-When the Engineering Engine requires a capability, it SHALL be able to ask
-the Model Gateway whether the active model can satisfy that requirement.
-
-Conceptually:
-
-Engineering Requirement
-        │
-        ▼
-Capability Request
-        │
-        ▼
-Model Gateway
-        │
-   ┌────┴────┐
-   ▼         ▼
-Supported  Unsupported
-   │         │
-   ▼         ▼
-Execute    Adapt / Select
-           Alternative
-
-This allows ClaireCoder to adapt to models with different capabilities.
-
--------------------------------------------------------------------------------
-
-# 18. Reasoning Controls
-
-The Model Gateway SHALL expose a normalized reasoning abstraction.
-
-The user-facing abstraction MAY include:
-
-- minimal,
-- low,
-- medium,
-- high,
-- maximum where supported.
-
-The Gateway SHALL translate these settings into provider-specific controls.
-
-Examples MAY include:
-
-- reasoning effort,
-- thinking level,
-- thinking budget,
-- provider-specific reasoning parameter.
-
-The Gateway SHALL preserve provider-specific controls where necessary.
-
--------------------------------------------------------------------------------
-
-# 19. Planning Versus Reasoning
-
-Planning Depth SHALL remain separate from model reasoning configuration.
-
-Planning determines:
-
-- how much planning ClaireCoder performs,
-- whether decomposition is required,
-- whether validation loops are used,
-- whether subagents are used.
-
-Reasoning configuration determines:
-
-- how much reasoning effort the selected model applies.
-
-The two systems MAY influence each other, but SHALL remain separate
-architecturally.
-
--------------------------------------------------------------------------------
-
-# 20. Tool Calling
-
-Tool calling SHALL be represented as a model capability.
-
-The Model Gateway SHALL normalize:
-
-- Tool definitions,
-- Tool calls,
-- Tool arguments,
-- Tool-call responses,
-- streaming Tool events where supported.
-
-Provider-specific Tool behavior MAY be preserved through adapter metadata.
-
-A provider supporting Tools does not guarantee that every model exposed by
-that provider supports Tools.
-
--------------------------------------------------------------------------------
-
-# 21. Structured Output
-
-Structured output SHALL be represented as a capability.
-
-The Model Gateway SHOULD support:
-
-- JSON output,
-- schema-based output,
-- structured responses.
-
-When a provider does not support the requested structured-output mechanism,
-the Engineering Engine MAY use an alternative strategy.
-
-The Gateway SHALL communicate capability availability rather than silently
-pretending support exists.
-
--------------------------------------------------------------------------------
-
-# 22. Vision
-
-Vision SHALL be represented as a model capability.
-
-If a Workflow requires image understanding, the Engineering Engine SHALL be
-able to determine whether the active Model Profile supports vision.
-
-If it does not, ClaireCoder MAY:
-
-- request another model,
-- use another Model Profile,
-- change the workflow,
-- ask the user,
-- continue without vision where possible.
-
-The Gateway SHALL not silently claim vision support.
-
--------------------------------------------------------------------------------
-
-# 23. Context Capacity
-
-The Model Gateway SHALL expose context-capacity information where available.
-
-The Context Engine MAY use this information to determine:
-
-- context budget,
-- Tool-result limits,
-- Skill loading,
-- repository retrieval,
-- compression requirements.
-
-The system SHALL not assume every model has the same context capacity.
-
--------------------------------------------------------------------------------
-
-# 24. Streaming
-
-The Model Gateway SHALL support streaming where the provider supports it.
-
-Streaming events SHOULD be normalized sufficiently for the Interaction Layer
-to display:
-
-- generated text,
-- Tool calls,
-- Tool results,
-- status,
-- completion,
-- errors.
-
-Provider-specific event data MAY remain accessible through an extension
-mechanism.
-
--------------------------------------------------------------------------------
-
-# 25. Authentication
-
-Authentication SHALL be handled by the Model Gateway configuration layer.
-
-The Engineering Engine SHALL not directly manage API keys.
-
-Credentials MAY originate from:
-
-- environment variables,
-- local configuration,
-- secure credential storage,
-- provider-specific authentication mechanisms.
-
-Raw credentials SHALL NOT be inserted into model context.
-
--------------------------------------------------------------------------------
-
-# 26. Provider Failure
-
-The Model Gateway SHALL distinguish between:
-
-- model failure,
-- provider failure,
-- endpoint failure,
-- authentication failure,
-- rate limiting,
-- capability mismatch,
-- temporary network failure.
-
-The Gateway SHOULD return structured failure information to the Engineering
-Engine.
-
-The Engineering Engine SHALL then determine whether to:
-
-- retry,
-- fallback,
-- switch model,
-- ask the user,
-- terminate.
-
--------------------------------------------------------------------------------
-
-# 27. Fallback Architecture
-
-Fallbacks SHALL exist at multiple levels.
-
-Provider Fallback:
-
-Use another provider capable of serving the requested model or task.
-
-Model Fallback:
-
-Use another compatible model.
-
-Capability Fallback:
-
-Use another model capable of the required capability.
-
-Execution Fallback:
-
-Retry or recover from a transient failure.
-
-Fallback behavior SHALL not silently change the model in situations where the
-difference may materially affect the engineering result.
-
--------------------------------------------------------------------------------
-
-# 28. Single-Model Configuration
-
-A configuration containing only one available model SHALL be valid.
+Provider identity SHALL NOT automatically determine Adapter identity.
 
 Example:
 
-Model Profile
-    ↓
-One Model
-    ↓
-All compatible ClaireCoder workflows
+    Groq
+        → OpenAI-Compatible Adapter
 
-ClaireCoder SHALL not require:
+    OpenAI
+        → OpenAI-Compatible Adapter
 
-- separate planning model,
-- separate coding model,
-- separate review model,
-- separate research model.
+    OpenRouter
+        → OpenAI-Compatible Adapter
 
-Multiple models are an optimization, not a requirement.
+    OmniRoute
+        → OpenAI-Compatible Adapter
 
--------------------------------------------------------------------------------
+    Ollama
+        → OpenAI-Compatible Adapter where endpoint supports it
 
-# 29. Multi-Model Configuration
+    LM Studio
+        → OpenAI-Compatible Adapter where endpoint supports it
 
-When multiple models are available, ClaireCoder MAY assign different models
-to different responsibilities.
+    vLLM
+        → OpenAI-Compatible Adapter where endpoint supports it
 
-Potential responsibilities include:
+    Anthropic
+        → Native Anthropic Adapter
 
-- planning,
-- coding,
-- review,
-- research,
-- vision,
-- summarization.
+    Gemini
+        → Native Gemini Adapter
 
-This assignment SHALL remain configurable.
+A Provider MAY use another Adapter in the future if the configured endpoint
+requires it.
 
-The Engineering Engine SHALL not assume that multiple models are always
-available.
 
 -------------------------------------------------------------------------------
 
-# 30. Router Integration
+# 9. Endpoint
 
-Model routers SHALL be represented as provider-routing components.
+An Endpoint represents the actual API address used for Model execution.
 
-A router MAY perform:
+Examples:
 
-- provider selection,
-- fallback,
-- latency optimization,
-- cost optimization,
-- availability selection.
+    Hosted:
+        https://provider.example/api
 
-ClaireCoder SHALL treat router configuration separately from Model Profiles.
+    Local:
+        http://localhost:<port>
 
-A Model Profile MAY select a router as its execution source.
+    LAN:
+        http://192.168.x.x:<port>
 
--------------------------------------------------------------------------------
+    Custom:
+        user-defined base URL
 
-# 31. Provider-Specific Parameters
+The Endpoint SHALL be configurable independently from the logical Model.
 
-The common Model Gateway interface SHALL expose normalized parameters.
+The architecture SHALL NOT hard-code a single endpoint for all Providers.
 
-However, it SHALL also support provider-specific parameters through an
-extension mechanism.
-
-This prevents the common interface from becoming either:
-
-Too restrictive:
-
-where provider features are lost.
-
-Or too provider-specific:
-
-where the Engineering Engine becomes coupled to individual APIs.
-
-Provider-specific parameters SHALL not become required for ordinary
-ClaireCoder operation.
 
 -------------------------------------------------------------------------------
 
-# 32. Model Selection
+# 10. Runtime
 
-Model selection SHALL be performed through the Model Gateway.
+A Runtime represents the environment executing the Model.
 
-Selection MAY consider:
+Examples include:
 
-- requested model,
-- Model Profile,
-- capabilities,
-- provider availability,
-- context capacity,
-- reasoning requirements,
-- user preference,
-- cost preference,
-- latency preference,
-- local/remote preference.
+    - cloud inference,
+    - Ollama,
+    - LM Studio,
+    - vLLM,
+    - self-hosted inference,
+    - local gateways,
+    - routed execution.
 
-The Engineering Engine SHALL provide requirements.
+Runtime SHALL remain distinct from Provider.
 
-The Model Gateway SHALL determine available execution options.
+A local Model MAY therefore be represented as:
 
--------------------------------------------------------------------------------
+    Model
+      ↓
+    Runtime
+      ↓
+    Endpoint
+      ↓
+    Adapter
 
-# 33. Model Discovery
-
-The Gateway SHOULD support model discovery where the provider or runtime
-allows it.
-
-Discovery MAY return:
-
-- model identifier,
-- display name,
-- provider,
-- runtime,
-- capabilities,
-- context capacity,
-- reasoning support,
-- vision support,
-- Tool support.
-
-Local runtimes SHOULD be discoverable where their APIs provide sufficient
-information.
-
-Users SHALL also be able to manually configure models when discovery is not
-available.
 
 -------------------------------------------------------------------------------
 
-# 34. Model Configuration
+# 11. Router
 
-The configuration hierarchy SHOULD conceptually be:
+A Router represents an intermediary capable of selecting an execution source.
 
-Provider
-    ↓
-Endpoint
-    ↓
-Model
-    ↓
-Capabilities
-    ↓
-Model Profile
+A Router MAY provide:
 
-This SHALL remain a conceptual architecture.
+    - provider selection,
+    - model selection,
+    - fallback,
+    - capability routing,
+    - availability routing,
+    - latency optimization,
+    - cost optimization,
+    - throughput preference.
 
-The final configuration schema SHALL be determined during implementation
-planning.
+Routing SHALL remain optional.
 
--------------------------------------------------------------------------------
+A direct Provider or local Runtime SHALL remain valid without a Router.
 
-# 35. Decision Rationale
-
-This architecture was selected because it satisfies the major Model Gateway
-requirements identified during RES research.
-
-It provides:
-
-- provider independence,
-- local model support,
-- hosted model support,
-- router support,
-- custom endpoints,
-- capability awareness,
-- single-model operation,
-- multi-model operation,
-- provider-specific extensibility.
-
-It also prevents model-provider logic from spreading into:
-
-- Workflows,
-- Skills,
-- Tools,
-- Context,
-- Sessions,
-- Permissions.
 
 -------------------------------------------------------------------------------
 
-# 36. Alternatives Considered
+# 12. OpenRouter
 
-## Alternative A — Direct Provider Calls From Engineering Engine
+OpenRouter SHALL be represented as a distinct hosted routed Provider.
 
-Decision:
+The architecture SHALL allow:
 
-REJECTED.
+    OpenRouter
+        ↓
+    OpenAI-Compatible Adapter
+        ↓
+    Configured hosted model
 
-Reason:
+OpenRouter SHALL remain a separate identity from OmniRoute.
 
-This creates provider coupling throughout the core agent.
+It SHALL NOT be represented as the same Provider or Runtime as OmniRoute.
 
--------------------------------------------------------------------------------
-
-## Alternative B — OpenAI-Compatible API Only
-
-Decision:
-
-REJECTED.
-
-Reason:
-
-Compatibility APIs are useful but may not expose every provider-specific
-capability.
-
-Native adapters remain necessary for important providers.
 
 -------------------------------------------------------------------------------
 
-## Alternative C — One Adapter Per Provider With No Generic Layer
+# 13. OmniRoute
 
-Decision:
+OmniRoute SHALL be represented as a distinct self-hosted local AI gateway.
 
-REJECTED.
+A typical local endpoint MAY be:
 
-Reason:
+    http://localhost:20128
 
-This would unnecessarily duplicate adapters for the large number of
-OpenAI-compatible endpoints.
+The port SHALL remain configurable.
 
--------------------------------------------------------------------------------
+The architecture SHALL NOT hard-code `20128` as a universal requirement.
 
-## Alternative D — Router-Only Architecture
+OmniRoute MAY expose an OpenAI-compatible endpoint and therefore MAY use the
+OpenAI-compatible Adapter.
 
-Decision:
+OmniRoute SHALL remain distinct from OpenRouter.
 
-REJECTED.
+The conceptual relationship is:
 
-Reason:
+    OmniRoute
+        ↓
+    local gateway/router
+        ↓
+    selected execution source
+        ↓
+    Model Gateway
 
-ClaireCoder must work without a router and must support local models and
-direct providers.
-
--------------------------------------------------------------------------------
-
-## Alternative E — Require Multiple Specialized Models
-
-Decision:
-
-REJECTED.
-
-Reason:
-
-This would make ClaireCoder inaccessible to users with only one available
-model or limited resources.
 
 -------------------------------------------------------------------------------
 
-# 37. Consequences
+# 14. Local Runtime Architecture
 
-## Positive Consequences
+Local inference SHALL be first-class.
 
-- Strong provider independence.
-- First-class local model support.
-- Easy custom endpoint support.
-- Router support.
-- Capability-aware execution.
-- Easier provider expansion.
-- Single-model accessibility.
-- Multi-model flexibility.
-- Cleaner Engineering Engine.
-- Provider-specific extensibility.
+Initial local runtime targets include:
 
-## Negative Consequences
+    - Ollama,
+    - LM Studio,
+    - vLLM,
+    - OmniRoute,
+    - other compatible local runtimes.
 
-- Adapter interfaces must be maintained.
-- Capability normalization introduces abstraction complexity.
-- Provider-specific behavior requires adapter-specific testing.
-- Model discovery may be inconsistent between providers.
-- Fallback behavior requires careful design.
+Local runtimes SHALL use the same Model Gateway abstraction as hosted models.
 
-These costs are accepted because model independence is a core ClaireCoder
-requirement.
+The Engineering Engine SHALL not need to know whether execution is:
+
+    local,
+    cloud,
+    self-hosted,
+    or routed.
+
 
 -------------------------------------------------------------------------------
 
-# 38. V1 Boundary
+# 15. OpenAI-Compatible Adapter
+
+ClaireCoder SHALL provide a generic OpenAI-compatible Adapter.
+
+The Adapter SHALL support configuration of:
+
+    - base URL,
+    - credential reference where required,
+    - model identifier,
+    - optional headers,
+    - capability metadata,
+    - compatible request parameters,
+    - streaming behavior.
+
+The Adapter MAY serve:
+
+    - Groq,
+    - OpenAI,
+    - OpenRouter,
+    - OmniRoute,
+    - Ollama,
+    - LM Studio,
+    - vLLM,
+    - other compatible endpoints.
+
+ClaireCoder SHALL NOT require a dedicated Adapter implementation for every
+OpenAI-compatible endpoint.
+
+
+-------------------------------------------------------------------------------
+
+# 16. Native Anthropic Adapter
+
+ClaireCoder SHALL provide a dedicated native Anthropic Adapter.
+
+The Adapter SHALL be responsible for:
+
+    - authentication,
+    - request translation,
+    - response normalization,
+    - streaming normalization,
+    - Tool calling,
+    - reasoning/thinking controls where supported,
+    - Provider-specific metadata.
+
+Anthropic-specific API behavior SHALL remain inside this Adapter.
+
+
+-------------------------------------------------------------------------------
+
+# 17. Native Gemini Adapter
+
+ClaireCoder SHALL provide a dedicated native Gemini Adapter.
+
+The Adapter SHALL be responsible for:
+
+    - authentication,
+    - request translation,
+    - response normalization,
+    - streaming normalization,
+    - Tool calling,
+    - structured output,
+    - vision,
+    - reasoning controls where supported,
+    - Provider-specific metadata.
+
+Gemini SHALL NOT be forced through an OpenAI-compatible Adapter merely for
+implementation convenience.
+
+
+-------------------------------------------------------------------------------
+
+# 18. Custom Adapter / Endpoint
+
+Users SHALL be able to configure custom model endpoints.
+
+A custom configuration MAY define:
+
+    - endpoint URL,
+    - adapter family,
+    - API format,
+    - model identifier,
+    - credential reference,
+    - headers,
+    - capabilities,
+    - provider-specific parameters.
+
+A custom endpoint SHALL NOT require modification of the Engineering Engine.
+
+
+-------------------------------------------------------------------------------
+
+# 19. Provider Profile
+
+ClaireCoder SHALL introduce a Provider Profile as a persistent/configuration
+abstraction.
+
+A Provider Profile MAY define:
+
+    - Provider identity,
+    - Adapter,
+    - Endpoint,
+    - Runtime,
+    - Router,
+    - Credential reference,
+    - default Model,
+    - available Models,
+    - capability metadata,
+    - Provider-specific parameters.
+
+Multiple Provider Profiles MAY exist for the same Provider.
+
+Examples:
+
+    openai-primary
+    openai-secondary
+    groq-fast
+    anthropic-main
+    gemini-main
+    openrouter-main
+    omni-local
+    ollama-local
+    lmstudio-local
+
+
+-------------------------------------------------------------------------------
+
+# 20. Model Profile
+
+ClaireCoder SHALL continue to support Model Profiles.
+
+A Model Profile MAY define:
+
+    - preferred Model,
+    - Provider Profile,
+    - reasoning level,
+    - fallback Model,
+    - capability requirements,
+    - latency preference,
+    - cost preference.
+
+The Model Profile SHALL remain a user-facing abstraction.
+
+It SHALL NOT replace the underlying Model Gateway entities.
+
+
+-------------------------------------------------------------------------------
+
+# 21. Credential Architecture
+
+Credentials SHALL be associated with Provider Profiles rather than one global
+credential slot.
+
+Conceptually:
+
+    Credential Store
+        │
+        ├── groq-primary
+        ├── openai-primary
+        ├── anthropic-primary
+        ├── gemini-primary
+        ├── openrouter-primary
+        └── local / omni profile
+
+The same installation MAY contain multiple credentials simultaneously.
+
+Example:
+
+    Provider Profile:
+        openai-primary
+        credential_ref = openai-primary
+
+    Provider Profile:
+        omni-local
+        endpoint = http://localhost:20128
+        credential_ref = omni-local
+
+Selecting one Profile SHALL NOT delete, replace, or invalidate another.
+
+Credential values SHALL remain below the Model Gateway configuration boundary.
+
+
+-------------------------------------------------------------------------------
+
+# 22. Credential Security
+
+Raw Provider credentials SHALL NOT be exposed to:
+
+    - Engineering Engine,
+    - Skills,
+    - Workflows,
+    - normal Model context,
+    - ordinary logs,
+    - frontend presentation state.
+
+The preferred persistent storage mechanism SHALL be the operating system
+secure credential store as established by the Desktop architecture.
+
+Environment variables MAY remain a supported configuration mechanism.
+
+Credential references SHALL be safe to expose to ordinary configuration code
+without exposing the secret value itself.
+
+
+-------------------------------------------------------------------------------
+
+# 23. Model Capabilities
+
+The Model Gateway SHALL expose capabilities separately from Model identity.
+
+Capabilities MAY include:
+
+    - text generation,
+    - Tool calling,
+    - parallel Tool calling,
+    - structured output,
+    - JSON schema,
+    - vision,
+    - reasoning,
+    - streaming,
+    - long context,
+    - embeddings,
+    - audio,
+    - image generation,
+    - code execution,
+    - computer-use capabilities.
+
+The actual selected Model and execution path SHALL determine capability
+availability.
+
+Provider-wide capability declarations SHALL NOT automatically apply to every
+Model.
+
+
+-------------------------------------------------------------------------------
+
+# 24. Capability Negotiation
+
+When the Engineering Engine requires a capability, it SHALL be able to query
+the Model Gateway.
+
+Conceptually:
+
+    Engineering Requirement
+            ↓
+    Model Gateway
+            ↓
+    Capability Check
+            │
+       ┌────┴────┐
+       ▼         ▼
+    Supported  Unsupported
+       │         │
+       ▼         ▼
+    Execute    Alternative /
+               Reconfiguration /
+               User Decision
+
+The Gateway SHALL not falsely advertise unsupported capabilities.
+
+
+-------------------------------------------------------------------------------
+
+# 25. Reasoning
+
+The Model Gateway SHALL expose normalized reasoning controls.
+
+The user-facing abstraction MAY include:
+
+    minimal
+    low
+    medium
+    high
+    maximum
+
+where supported.
+
+The Gateway SHALL translate these into provider-specific mechanisms.
+
+Provider-specific reasoning parameters SHALL remain available through Adapter
+extensions where required.
+
+Planning Depth SHALL remain owned by the Workflow system and SHALL not be
+implemented inside the Model Gateway.
+
+
+-------------------------------------------------------------------------------
+
+# 26. Tool Calling
+
+Tool calling SHALL be represented as a Model capability.
+
+The Gateway SHALL normalize:
+
+    - Tool definitions,
+    - Tool calls,
+    - Tool arguments,
+    - Tool results,
+    - streaming Tool events where supported.
+
+Provider-specific Tool behavior MAY remain available through Adapter metadata.
+
+Provider-level Tool support SHALL NOT imply Model-level Tool support.
+
+
+-------------------------------------------------------------------------------
+
+# 27. Structured Output
+
+Structured output SHALL be represented as a capability.
+
+The Gateway SHOULD support:
+
+    - JSON,
+    - JSON schema,
+    - provider-native structured output.
+
+Unsupported mechanisms SHALL be reported rather than falsely emulated.
+
+
+-------------------------------------------------------------------------------
+
+# 28. Vision
+
+Vision SHALL be represented as a Model capability.
+
+The Engineering Engine SHALL be able to determine whether the active Model
+satisfies a required vision capability.
+
+Possible responses to unsupported vision MAY include:
+
+    - Model switch,
+    - Profile switch,
+    - Workflow adaptation,
+    - user intervention.
+
+
+-------------------------------------------------------------------------------
+
+# 29. Context Capacity
+
+The Model Gateway SHALL expose context-capacity information where available.
+
+The Context Engine MAY use it to determine:
+
+    - repository context,
+    - Skill loading,
+    - Tool results,
+    - session history,
+    - planning artifacts.
+
+Models with smaller context capacities SHALL remain valid.
+
+
+-------------------------------------------------------------------------------
+
+# 30. Streaming
+
+The Model Gateway SHALL support streaming where the selected execution path
+supports it.
+
+Normalized streaming SHALL support:
+
+    - generated text,
+    - Tool-call events,
+    - Tool arguments,
+    - completion,
+    - errors.
+
+Provider-specific event metadata MAY remain available through Adapter
+extensions.
+
+
+-------------------------------------------------------------------------------
+
+# 31. Failure Model
+
+The Model Gateway SHALL distinguish:
+
+    - authentication failure,
+    - endpoint failure,
+    - network failure,
+    - rate limiting,
+    - Model failure,
+    - capability mismatch,
+    - protocol mismatch,
+    - Adapter failure,
+    - configuration failure,
+    - temporary Provider failure.
+
+The Gateway SHALL return structured failure information.
+
+The Engineering Engine SHALL determine the appropriate engineering response.
+
+
+-------------------------------------------------------------------------------
+
+# 32. Fallback
+
+Fallback SHALL support:
+
+    Provider Fallback
+        Use another configured Provider.
+
+    Model Fallback
+        Use another compatible Model.
+
+    Capability Fallback
+        Use another Model satisfying the requirement.
+
+    Execution Fallback
+        Retry or recover from a transient failure.
+
+The Gateway SHALL NOT silently switch to a materially different Model when
+that change may alter engineering behavior.
+
+Material Model changes SHOULD be visible to the user.
+
+
+-------------------------------------------------------------------------------
+
+# 33. Single-Model Operation
+
+Single-model operation SHALL remain fully supported.
+
+A user may configure:
+
+    Provider Profile
+        ↓
+    Model Profile
+        ↓
+    One Model
+        ↓
+    All compatible ClaireCoder stages
+
+Multiple subscriptions SHALL NOT be required.
+
+
+-------------------------------------------------------------------------------
+
+# 34. Multi-Provider / Multi-Model Operation
+
+Multiple Provider Profiles MAY coexist simultaneously.
+
+Multiple Model Profiles MAY coexist simultaneously.
+
+The system MAY assign different Models to:
+
+    - planning,
+    - implementation,
+    - review,
+    - research,
+    - vision,
+    - summarization.
+
+This remains optional.
+
+The architecture SHALL work for users with a single Model as well.
+
+
+-------------------------------------------------------------------------------
+
+# 35. Model Selection
+
+Model selection MAY consider:
+
+    - explicit Model selection,
+    - Model Profile,
+    - Provider Profile,
+    - capability requirements,
+    - Provider availability,
+    - context capacity,
+    - reasoning requirements,
+    - user preference,
+    - local/remote preference,
+    - Router availability.
+
+Explicit user configuration SHALL take precedence over speculative automatic
+optimization.
+
+
+-------------------------------------------------------------------------------
+
+# 36. Model Discovery
+
+Discovery SHOULD be supported where a Provider, Runtime, or Router exposes
+sufficient information.
+
+Discovery MAY provide:
+
+    - Model identifier,
+    - display name,
+    - Provider,
+    - Runtime,
+    - Endpoint,
+    - Router,
+    - capabilities,
+    - context capacity,
+    - Tool support,
+    - vision support,
+    - reasoning support,
+    - streaming support.
+
+Manual configuration SHALL remain valid when discovery is unavailable.
+
+
+-------------------------------------------------------------------------------
+
+# 37. Model Configuration Lifecycle
+
+The conceptual lifecycle SHALL be:
+
+    DISCOVER / CONFIGURE
+            ↓
+        VALIDATE
+            ↓
+         REGISTER
+            ↓
+    CAPABILITY DETECTION
+            ↓
+      MODEL AVAILABLE
+            ↓
+          SELECT
+            ↓
+         EXECUTE
+
+Manual configurations SHALL use the same lifecycle.
+
+
+-------------------------------------------------------------------------------
+
+# 38. Interface Contract
+
+The Model Gateway SHALL expose a normalized interface to the Engineering
+Engine supporting, conceptually:
+
+    MODEL DISCOVERY
+    PROVIDER DISCOVERY
+    MODEL SELECTION
+    PROVIDER PROFILE SELECTION
+    CAPABILITY QUERY
+    MODEL INVOCATION
+    STREAMING
+    TOOL CALL HANDLING
+    STRUCTURED OUTPUT
+    ERROR REPORTING
+    FALLBACK
+    VALIDATION
+
+Exact class names and schemas SHALL be determined during implementation.
+
+
+-------------------------------------------------------------------------------
+
+# 39. Compatibility
+
+The architecture SHALL remain compatible with:
+
+    - hosted Models,
+    - local Models,
+    - self-hosted Models,
+    - OpenAI-compatible endpoints,
+    - native Anthropic APIs,
+    - native Gemini APIs,
+    - routed Models,
+    - custom endpoints,
+    - future Providers.
+
+Adding a new Provider SHALL NOT require Engineering Engine modification.
+
+
+-------------------------------------------------------------------------------
+
+# 40. Security Boundary
+
+The Model Gateway SHALL:
+
+    - isolate credentials,
+    - prevent secrets from entering Model context,
+    - preserve Permission Engine boundaries,
+    - prevent Provider configuration from becoming an alternate security system,
+    - avoid raw credentials in normal logs.
+
+Provider configuration SHALL not bypass Tool authorization.
+
+
+-------------------------------------------------------------------------------
+
+# 41. Alternatives Considered
+
+## Alternative A — Direct Provider Calls
+
+    REJECTED.
+
+Provider-specific logic would spread into the Engineering Engine.
+
+## Alternative B — OpenAI-Compatible Only
+
+    REJECTED.
+
+Not all required Providers expose the same API semantics.
+
+Native Anthropic and Gemini adapters are therefore required.
+
+## Alternative C — One Adapter Per Provider
+
+    REJECTED.
+
+This duplicates implementations for compatible endpoints.
+
+## Alternative D — Router-Only
+
+    REJECTED.
+
+ClaireCoder must work with direct Providers and local runtimes without a Router.
+
+## Alternative E — One Global Credential
+
+    REJECTED.
+
+Users may simultaneously configure multiple Providers and local gateways.
+
+## Alternative F — Treat OpenRouter and OmniRoute as the Same Provider
+
+    REJECTED.
+
+They are distinct systems with different deployment models and ownership.
+
+
+-------------------------------------------------------------------------------
+
+# 42. Consequences
+
+## Positive
+
+    - Strong provider independence.
+    - First-class local inference.
+    - Native support for incompatible APIs.
+    - Reuse of compatibility adapters.
+    - Multiple providers can coexist.
+    - Multiple credentials can coexist.
+    - OpenRouter and OmniRoute remain distinct.
+    - Custom endpoints remain possible.
+    - Cleaner Engineering Engine.
+    - Easier provider expansion.
+
+## Negative
+
+    - Adapter interfaces require maintenance.
+    - Capability normalization adds complexity.
+    - Provider-specific testing is required.
+    - Local and cloud environments behave differently.
+    - Fallback design requires careful validation.
+    - Credential/profile configuration becomes richer.
+
+These costs are accepted because provider independence and local-first
+compatibility are core ClaireCoder requirements.
+
+
+-------------------------------------------------------------------------------
+
+# 43. V1 Boundary
 
 The following SHALL be part of the V1 Model Gateway architecture:
 
-- Model Gateway.
-- Provider adapter interface.
-- OpenAI-compatible adapter.
-- Model abstraction.
-- Provider abstraction.
-- Endpoint abstraction.
-- Capability representation.
-- Model Profile concept.
-- Local endpoint support.
-- Custom endpoint support.
-- Streaming support where available.
-- Tool capability representation.
-- Reasoning capability representation.
-- Context-capacity representation.
-- Authentication abstraction.
+    - Model Gateway
+    - Provider abstraction
+    - Adapter abstraction
+    - OpenAI-compatible adapter
+    - native Anthropic adapter
+    - native Gemini adapter
+    - Model abstraction
+    - Endpoint abstraction
+    - Runtime abstraction
+    - Router abstraction
+    - Provider Profile
+    - Model Profile
+    - credential references
+    - local endpoint support
+    - OpenRouter support
+    - OmniRoute support
+    - custom endpoint support
+    - capability representation
+    - capability negotiation
+    - streaming
+    - Tool capability representation
+    - reasoning capability representation
+    - context-capacity representation
+    - authentication abstraction
 
-The following MAY remain optional implementation extensions:
+The following MAY remain optional extensions:
 
-- advanced automatic model routing,
-- automatic cost optimization,
-- advanced latency optimization,
-- complex provider scoring,
-- automatic model benchmarking,
-- advanced model recommendation.
+    - advanced automatic routing,
+    - automatic cost optimization,
+    - advanced latency optimization,
+    - complex provider scoring,
+    - automatic model benchmarking,
+    - advanced model recommendation.
 
-ClaireCoder SHALL remain fully functional without these features.
+ClaireCoder SHALL remain fully functional without those features.
+
 
 -------------------------------------------------------------------------------
 
-# 39. Implementation Guidance
+# 44. Implementation Guidance
 
 The Model Gateway SHOULD initially favor:
 
-- explicit provider interfaces,
-- explicit capability structures,
-- simple adapter classes,
-- structured model responses,
-- normalized streaming events,
-- deterministic error types,
-- configuration-driven endpoints.
+    - explicit Provider interfaces,
+    - explicit Adapter interfaces,
+    - explicit capability structures,
+    - simple Adapter implementations,
+    - structured Model responses,
+    - normalized streaming events,
+    - deterministic error types,
+    - configuration-driven endpoints,
+    - independent Provider Profiles,
+    - adapter conformance tests.
 
 The implementation SHALL avoid:
 
-- embedding provider logic into the Engineering Engine,
-- forcing every provider into identical behavior,
-- requiring a router,
-- requiring multiple models,
-- requiring cloud inference,
-- creating unnecessary distributed infrastructure.
+    - embedding Provider logic into the Engineering Engine,
+    - forcing every Provider into identical behavior,
+    - requiring a Router,
+    - requiring multiple Models,
+    - requiring cloud inference,
+    - creating unnecessary distributed infrastructure,
+    - conflating OpenRouter and OmniRoute.
+
 
 -------------------------------------------------------------------------------
 
-# 40. Decision Status
+# 45. Verification Strategy
+
+## Architecture Tests
+
+Verify:
+
+    - Engineering Engine accesses only Model Gateway.
+    - Provider-specific APIs do not leak into core Engine code.
+    - Adapter registration works.
+    - Provider/Profile separation works.
+
+## Adapter Tests
+
+Verify:
+
+    - OpenAI-compatible adapter,
+    - Anthropic adapter,
+    - Gemini adapter,
+    - local-compatible endpoint path.
+
+## Provider Tests
+
+Where practical, validate independently:
+
+    - Groq,
+    - OpenAI,
+    - Anthropic,
+    - Gemini,
+    - OpenRouter,
+    - OmniRoute,
+    - Ollama,
+    - LM Studio,
+    - vLLM.
+
+Live tests MAY require credentials or running local services.
+
+Mocked adapter-conformance tests SHALL remain independent from external
+services.
+
+## Configuration Tests
+
+Verify:
+
+    - single-provider configuration,
+    - multi-provider configuration,
+    - single-model configuration,
+    - multi-model configuration,
+    - independent credential references,
+    - local/cloud coexistence,
+    - custom endpoints.
+
+## Capability Tests
+
+Verify:
+
+    - Tool calling,
+    - structured output,
+    - vision,
+    - reasoning,
+    - streaming,
+    - context-capacity reporting.
+
+## Failure Tests
+
+Verify:
+
+    - authentication failure,
+    - endpoint failure,
+    - rate limiting,
+    - capability mismatch,
+    - protocol mismatch,
+    - adapter failure,
+    - Provider failure,
+    - fallback behavior.
+
+
+-------------------------------------------------------------------------------
+
+# 46. Decision Status
 
 STATUS
 
-ACCEPTED
+    DRAFT
 
-This ADR establishes the Model Gateway architecture for ClaireCoder V1.
+This ADR revises the V1 Model Gateway architecture to make the existing
+adapter-based design explicitly multi-provider and protocol-aware.
 
-Later ADRs MAY refine:
+The fundamental Model Gateway boundary remains unchanged.
 
-- Tool integration,
-- Skills,
-- Workflows,
-- Context,
-- Sessions,
-- Interaction,
-- Permissions.
+The Provider / Adapter distinction is now explicit.
 
-A later decision SHALL explicitly supersede this ADR if it changes the Model
-Gateway's fundamental architecture.
+OpenAI-compatible providers and local runtimes may share one Adapter family.
 
--------------------------------------------------------------------------------
+Anthropic and Gemini retain native adapter paths.
 
-# 41. Relationship With Other ADRs
+OpenRouter and OmniRoute remain distinct systems.
 
-CC-ADR-001
+Credential configuration is Profile-scoped rather than globally singular.
 
-ClaireCoder Core Architecture
+This ADR SHALL become final only after:
 
-Defines the overall system boundaries.
+    CC-PRD-002 V2.0
+        +
+    CC-ADR-002 V2.0
+        ↓
+    Independent review
+        ↓
+    Documentation approval
 
-CC-ADR-002
-
-Model Gateway & Provider Architecture
-
-Defines the model execution boundary.
-
-CC-ADR-003
-
-Tool & Skill Extension Architecture
-
-Defines how Tools and Skills integrate with the Engineering Engine.
-
-CC-ADR-004
-
-Workflow, Context & Engineering Session Architecture
-
-Defines engineering execution state and context.
-
-CC-ADR-005
-
-Interaction, Modes & Command Architecture
-
-Defines the user interaction system.
-
-CC-ADR-006
-
-Permission, Autonomy & Security Architecture
-
-Defines execution security and autonomy.
 
 -------------------------------------------------------------------------------
 
-# 42. AI Instructions
+# 47. AI Instructions
 
 When implementing or documenting ClaireCoder after this ADR:
 
-1. Treat the Model Gateway as the only model execution boundary.
-2. Keep provider-specific API logic inside adapters.
-3. Keep the Engineering Engine provider independent.
-4. Support native provider adapters where necessary.
-5. Support generic OpenAI-compatible endpoints.
-6. Keep local runtimes first-class.
-7. Support custom endpoints.
-8. Keep routers optional.
-9. Keep single-model operation valid.
-10. Keep multi-model operation optional.
-11. Represent capabilities explicitly.
-12. Do not assume provider capability equals model capability.
-13. Keep Planning Depth separate from model reasoning configuration.
-14. Preserve provider-specific parameters through an extension mechanism.
-15. Keep credentials outside model context.
-16. Preserve streaming where supported.
-17. Preserve structured output where supported.
-18. Preserve Tool and vision capability detection.
-19. Keep fallback behavior visible when model changes materially.
-20. Do not introduce unnecessary provider-specific logic into other
-    subsystems.
-21. Treat this ADR as the authoritative Model Gateway architecture unless
-    explicitly superseded.
+    1. Treat the Model Gateway as the only model-execution boundary.
+    2. Keep Provider-specific API logic inside Adapters.
+    3. Keep Engineering Engine Provider-independent.
+    4. Keep Model, Provider, Adapter, Endpoint, Runtime, Router,
+       Provider Profile, and Model Profile distinct.
+    5. Support native Provider Adapters where required.
+    6. Support OpenAI-compatible endpoints.
+    7. Keep local runtimes first-class.
+    8. Support Ollama.
+    9. Support LM Studio.
+    10. Support vLLM.
+    11. Support OmniRoute as a distinct self-hosted gateway.
+    12. Support OpenRouter as a distinct hosted routed Provider.
+    13. Never conflate OpenRouter with OmniRoute.
+    14. Support custom endpoints.
+    15. Keep Routers optional.
+    16. Preserve single-model operation.
+    17. Preserve multi-provider operation.
+    18. Preserve optional multi-model operation.
+    19. Represent capabilities explicitly.
+    20. Do not assume Provider capability equals Model capability.
+    21. Keep Planning Depth separate from reasoning configuration.
+    22. Preserve Provider-specific parameters through Adapter extensions.
+    23. Keep credentials outside Model context.
+    24. Support independent credential references per Provider Profile.
+    25. Preserve streaming where supported.
+    26. Preserve structured output where supported.
+    27. Preserve Tool and vision capability detection.
+    28. Keep fallback behavior visible when Model changes materially.
+    29. Do not introduce unnecessary distributed infrastructure.
+    30. Do not hard-code OmniRoute's default port.
+    31. Prefer adapter conformance tests before Provider-specific special cases.
+    32. Keep ClaireCoder independent from other Claire ecosystem projects.
+    33. Treat this ADR as the authoritative Model Gateway architecture unless
+        explicitly superseded.
+
 
 ###############################################################################
 
