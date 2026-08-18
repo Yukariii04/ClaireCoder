@@ -117,13 +117,39 @@ def model_gateway():
 
 def test_objective_intake_and_session(model_gateway, tool_executor, skill_registry):
     events = []
-    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry, event_callback=lambda e, d: events.append((e, d)))
+    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry)
+    engine.subscribe(lambda e, d: events.append((e, d)))
     obj = EngineeringObjective(id="obj1", request="Do something", session_id="s1")
     session = engine.receive_objective(obj)
     assert session.id == "s1"
     assert session.objective.id == "obj1"
     assert events[0][0] == EngineEvent.OBJECTIVE_STARTED
     assert engine.get_session("s1") == session
+
+def test_engine_public_subscription(model_gateway, tool_executor, skill_registry):
+    """Test the public subscription API for EngineEvents."""
+    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry)
+    
+    events1 = []
+    events2 = []
+    
+    def cb1(e, d): events1.append(e)
+    def cb2(e, d): events2.append(e)
+    
+    engine.subscribe(cb1)
+    engine.subscribe(cb2)
+    
+    obj = EngineeringObjective(id="obj1", request="Test", session_id="s1")
+    engine.receive_objective(obj)
+    
+    assert EngineEvent.OBJECTIVE_STARTED in events1
+    assert EngineEvent.OBJECTIVE_STARTED in events2
+    
+    engine.unsubscribe(cb1)
+    engine.cancel_objective("s1")
+    
+    assert EngineEvent.EXECUTION_CANCELLED not in events1
+    assert EngineEvent.EXECUTION_CANCELLED in events2
 
 def test_session_persistence_clean_process():
     """Verify save/resume works in a clean python process without shared state."""
@@ -281,7 +307,8 @@ def test_tool_context_propagation(tool_executor, model_gateway, permission_engin
 
 def test_validation_and_replanning(model_gateway, tool_executor, skill_registry):
     events = []
-    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry, event_callback=lambda e, d: events.append(e))
+    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry)
+    engine.subscribe(lambda e, d: events.append(e))
     engine.receive_objective(EngineeringObjective(id="obj1", request="Validate me", session_id="s1"))
     engine.plan_tasks("s1", [Task(id="t1", objective_id="obj1", description="To validate")])
     engine.start_task("s1", "t1")
@@ -299,7 +326,8 @@ def test_model_failure_propagation(model_gateway, tool_executor, skill_registry)
 
 def test_interruption_and_cancellation(model_gateway, tool_executor, skill_registry):
     events = []
-    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry, event_callback=lambda e, d: events.append(e))
+    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry)
+    engine.subscribe(lambda e, d: events.append(e))
     engine.receive_objective(EngineeringObjective(id="obj1", request="Interrupt me", session_id="s1"))
     engine.interrupt_execution("s1")
     assert EngineEvent.EXECUTION_PAUSED in events
@@ -311,7 +339,8 @@ def test_planning_and_task_transitions(model_gateway, tool_executor, skill_regis
        AC-003: The Engine can execute a Task...
     """
     events = []
-    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry, event_callback=lambda e, d: events.append(e))
+    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry)
+    engine.subscribe(lambda e, d: events.append(e))
     engine.receive_objective(EngineeringObjective(id="obj1", request="Plan me", session_id="s1"))
     
     task1 = Task(id="t1", objective_id="obj1", description="Task 1")
@@ -341,7 +370,8 @@ def test_model_independence(model_gateway, tool_executor, skill_registry):
 def test_permission_boundary_remains_intact(tool_executor, model_gateway, permission_engine, skill_registry):
     """AC-005: Tool execution cannot bypass Permission Engine."""
     events = []
-    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry, event_callback=lambda e, d: events.append(e))
+    engine = EngineeringEngine(model_gateway, tool_executor, skill_registry)
+    engine.subscribe(lambda e, d: events.append(e))
     
     # 1. Allowed tool
     res1 = engine.request_tool("test_tool", session_id="s1")

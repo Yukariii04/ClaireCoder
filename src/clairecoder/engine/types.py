@@ -30,6 +30,7 @@ class EngineEvent(str, Enum):
     TASK_STARTED = "task_started"
     TOOL_REQUESTED = "tool_requested"
     PERMISSION_REQUESTED = "permission_requested"
+    PERMISSION_RESOLVED = "permission_resolved"
     TOOL_COMPLETED = "tool_completed"
     VALIDATION_STARTED = "validation_started"
     VALIDATION_COMPLETED = "validation_completed"
@@ -39,3 +40,4 @@ class EngineEvent(str, Enum):
     EXECUTION_PAUSED = "execution_paused"
     EXECUTION_CANCELLED = "execution_cancelled"
     EXECUTION_FAILED = "execution_failed"
+

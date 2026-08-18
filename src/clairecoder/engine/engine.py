@@ -182,13 +182,25 @@ class EngineeringEngine:
         self._model_gateway = model_gateway
         self._tool_executor = tool_executor
         self._skill_registry = skill_registry
-        self._event_callback = event_callback
+        self._event_subscribers: List[Callable[[EngineEvent, Dict[str, Any]], None]] = []
+        if event_callback:
+            self._event_subscribers.append(event_callback)
         self._sessions: Dict[str, EngineeringSession] = {}
         
+    def subscribe(self, callback: Callable[[EngineEvent, Dict[str, Any]], None]) -> None:
+        """Register a public event subscriber."""
+        if callback not in self._event_subscribers:
+            self._event_subscribers.append(callback)
+            
+    def unsubscribe(self, callback: Callable[[EngineEvent, Dict[str, Any]], None]) -> None:
+        """Remove a public event subscriber."""
+        if callback in self._event_subscribers:
+            self._event_subscribers.remove(callback)
+
     def _emit(self, event: EngineEvent, data: Dict[str, Any] = None):
         """Emit a structured progress event to the Interaction Layer."""
-        if self._event_callback:
-            self._event_callback(event, data or {})
+        for callback in self._event_subscribers:
+            callback(event, data or {})
 
     # =========================================================================
     # SESSION MANAGEMENT (PERSISTENCE & RESUMPTION)
@@ -332,7 +344,9 @@ class EngineeringEngine:
         **kwargs
     ) -> ToolResult:
         """Coordinate ToolExecutor invocation with correct context propagation."""
-        self._emit(EngineEvent.TOOL_REQUESTED, {"tool_id": tool_id})
+        import uuid
+        request_id = str(uuid.uuid4())
+        self._emit(EngineEvent.TOOL_REQUESTED, {"tool_id": tool_id, "tool_name": tool_id, "request_id": request_id})
         
         # We forward the context to the ToolExecutor boundary (which passes it to PermissionEngine)
         result = self._tool_executor.invoke(
@@ -346,12 +360,123 @@ class EngineeringEngine:
         if result.state == ToolState.DENIED and result.metadata.get("requires_confirmation"):
             self._emit(EngineEvent.PERMISSION_REQUESTED, {
                 "tool_id": tool_id, 
+                "tool_name": tool_id,
+                "request_id": request_id,
                 "action": result.metadata.get("action"), 
-                "resource": result.metadata.get("resource")
+                "resource": result.metadata.get("resource"),
+                "command": result.metadata.get("command"),
+                "reason": result.metadata.get("reason"),
+                "category": result.metadata.get("category"),
+                "session_id": session_id,
+                "metadata": result.metadata
             })
             
-        self._emit(EngineEvent.TOOL_COMPLETED, {"tool_id": tool_id, "state": result.state})
+        self._emit(EngineEvent.TOOL_COMPLETED, {
+            "tool_id": tool_id, 
+            "tool_name": tool_id,
+            "request_id": request_id, 
+            "session_id": session_id,
+            "action": result.metadata.get("action"),
+            "resource": result.metadata.get("resource"),
+            "state": result.state,
+            "result": result.output if result.state == ToolState.SUCCESS else result.error,
+            "metadata": result.metadata
+        })
         return result
+
+
+    def grant_session_permission(
+        self,
+        session_id: str,
+        tool_id: Optional[str] = None,
+        operation: Optional[str] = None,
+        resource: Optional[str] = None,
+        category: Optional[str] = None,
+        resource_scope: Optional[str] = None,
+        priority: int = 50
+    ) -> Any:
+        """Public method to grant session-scoped authorization via ToolExecutor -> PermissionEngine."""
+        from clairecoder.permissions.types import PermissionCategory, ResourceScope
+        cat_enum = PermissionCategory(category) if category else None
+        scope_enum = ResourceScope(resource_scope) if resource_scope else None
+        return self._tool_executor.grant_session_permission(
+            session_id=session_id,
+            tool_id=tool_id,
+            operation=operation,
+            resource=resource,
+            category=cat_enum,
+            resource_scope=scope_enum,
+            priority=priority
+        )
+
+    def resolve_permission(
+        self,
+        request_id: str,
+        decision: str,
+        session_id: Optional[str] = None,
+        tool_id: Optional[str] = None,
+        action: Optional[str] = None,
+        resource: Optional[str] = None,
+        command: Optional[str] = None,
+        category: Optional[str] = None
+    ) -> None:
+        """Public method to resolve a pending permission confirmation and emit the event."""
+        norm_decision = str(decision).lower()
+        if norm_decision in ("always", "always_session"):
+            if session_id:
+                self.grant_session_permission(
+                    session_id=session_id,
+                    tool_id=tool_id,
+                    operation=action,
+                    resource=resource,
+                    category=category
+                )
+            self._emit(EngineEvent.PERMISSION_RESOLVED, {
+                "request_id": request_id,
+                "decision": "granted",
+                "scope": "session",
+                "session_id": session_id,
+                "tool_id": tool_id,
+                "tool_name": tool_id,
+                "action": action,
+                "resource": resource,
+                "command": command
+            })
+        elif norm_decision in ("approve", "granted", "yes", "y"):
+            self._emit(EngineEvent.PERMISSION_RESOLVED, {
+                "request_id": request_id,
+                "decision": "granted",
+                "scope": "once",
+                "session_id": session_id,
+                "tool_id": tool_id,
+                "tool_name": tool_id,
+                "action": action,
+                "resource": resource,
+                "command": command
+            })
+        elif norm_decision in ("deny", "denied", "no", "n"):
+            self._emit(EngineEvent.PERMISSION_RESOLVED, {
+                "request_id": request_id,
+                "decision": "denied",
+                "session_id": session_id,
+                "tool_id": tool_id,
+                "tool_name": tool_id,
+                "action": action,
+                "resource": resource,
+                "command": command
+            })
+        elif norm_decision in ("cancel", "cancelled", "escape", "esc"):
+            self._emit(EngineEvent.PERMISSION_RESOLVED, {
+                "request_id": request_id,
+                "decision": "cancelled",
+                "session_id": session_id,
+                "tool_id": tool_id,
+                "tool_name": tool_id,
+                "action": action,
+                "resource": resource,
+                "command": command
+            })
+
 
     def interaction_loop(self, session_id: str, task_id: str, max_iterations: int = 5) -> "ExecutionResult":
         """A complete Phase 7 Model Interaction Loop (Model -> Tool -> Result -> Model).
