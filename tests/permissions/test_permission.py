@@ -161,3 +161,22 @@ def test_scope_normalization_compatibility():
     # Passed as strings, engine compatibility layer should normalize to Enums
     state = engine.check_permission("read", "file.txt", tool_id="test_tool", category="read", resource_scope="file")
     assert state == PermissionState.ASK
+
+def test_grant_session_permission():
+    engine = PermissionEngine(autonomy_level=AutonomyLevel.SUPERVISED)
+    req1 = PermissionRequest("pytest", "execute", "tests/", PermissionCategory.EXECUTE, ResourceScope.COMMAND, session_id="sess_1")
+    req2 = PermissionRequest("pytest", "execute", "tests/", PermissionCategory.EXECUTE, ResourceScope.COMMAND, session_id="sess_2")
+    
+    # Initially both require ASK in SUPERVISED mode
+    assert engine.evaluate_request(req1) == PermissionState.ASK
+    assert engine.evaluate_request(req2) == PermissionState.ASK
+    
+    # Grant session-scoped permission for sess_1
+    rule = engine.grant_session_permission(session_id="sess_1", tool_id="pytest")
+    assert rule.decision == PermissionState.ALLOW
+    assert rule.session_id == "sess_1"
+    
+    # Now sess_1 is ALLOW, sess_2 is still ASK
+    assert engine.evaluate_request(req1) == PermissionState.ALLOW
+    assert engine.evaluate_request(req2) == PermissionState.ASK
+

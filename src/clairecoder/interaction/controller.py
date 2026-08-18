@@ -1,4 +1,4 @@
-from typing import Dict, Callable
+from typing import Any, Callable, Dict, List, Optional
 from .types import CommandDefinition, CommandRequest, CommandResponse, InteractionMode
 from clairecoder.engine.engine import EngineeringEngine
 from clairecoder.engine.types import EngineeringObjective
@@ -19,8 +19,22 @@ class InteractionController:
         self._commands: Dict[str, CommandDefinition] = {}
         self._handlers: Dict[str, Callable[[CommandRequest], CommandResponse]] = {}
         self._mode = InteractionMode.IMPLEMENT
+        # Connect engine events to controller subscribers
+        self._engine.subscribe(self._handle_engine_event)
+        self._event_subscribers: List[Callable[['Event'], None]] = []
 
         self._register_default_commands()
+
+    def subscribe(self, callback: Callable[['Event'], None]) -> None:
+        """Register a subscriber to receive engine events."""
+        self._event_subscribers.append(callback)
+        
+    def _handle_engine_event(self, engine_event: 'EngineEvent', data: Dict[str, 'Any']) -> None:
+        """Translates internal engine events to the public interaction Event boundary."""
+        from clairecoder.core.events import Event
+        event = Event(name=engine_event.value, payload=data)
+        for sub in self._event_subscribers:
+            sub(event)
 
     def register_command(self, definition: CommandDefinition, handler: Callable[[CommandRequest], CommandResponse]) -> None:
         """Register a command and its handler."""
@@ -100,6 +114,36 @@ class InteractionController:
         )
         session = self._engine.receive_objective(objective)
         return f"Objective accepted in session {session.id}"
+
+    def handle_permission_response(
+        self,
+        request_id: str,
+        decision: Any,
+        session_id: Optional[str] = None,
+        tool_id: Optional[str] = None,
+        action: Optional[str] = None,
+        resource: Optional[str] = None,
+        command: Optional[str] = None,
+        category: Optional[str] = None,
+        **kwargs: Any
+    ) -> None:
+        """Handle a user permission confirmation response from the UI presentation layer.
+
+        Routes the decision to the Engineering Engine through its public boundary.
+        Does NOT make authorization policy decisions or execute tools.
+        """
+        decision_str = decision.value if hasattr(decision, "value") else str(decision)
+        self._engine.resolve_permission(
+            request_id=request_id,
+            decision=decision_str,
+            session_id=session_id,
+            tool_id=tool_id,
+            action=action,
+            resource=resource,
+            command=command,
+            category=category
+        )
+
 
     def execute_command(self, request: CommandRequest) -> CommandResponse:
         """Execute a parsed command through the controller.

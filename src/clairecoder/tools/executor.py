@@ -120,3 +120,25 @@ class ToolExecutor:
             "external_service": ResourceScope.EXTERNAL_SERVICE,
         }
         return mapping.get(scope, ResourceScope.PROJECT)
+
+    def grant_session_permission(
+        self,
+        session_id: str,
+        tool_id: Optional[str] = None,
+        operation: Optional[str] = None,
+        resource: Optional[str] = None,
+        category: Optional[PermissionCategory] = None,
+        resource_scope: Optional[ResourceScope] = None,
+        priority: int = 50
+    ) -> Any:
+        """Grant session-scoped permission through the Permission Engine."""
+        return self._permission_engine.grant_session_permission(
+            session_id=session_id,
+            tool_id=tool_id,
+            operation=operation,
+            resource=resource,
+            category=category,
+            resource_scope=resource_scope,
+            priority=priority
+        )
+

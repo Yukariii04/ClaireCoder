@@ -93,6 +93,30 @@ class PermissionEngine(PermissionEngineInterface):
         )
         return self.evaluate_request(req)
         
+    def grant_session_permission(
+        self,
+        session_id: str,
+        tool_id: Optional[str] = None,
+        operation: Optional[str] = None,
+        resource: Optional[str] = None,
+        category: Optional[PermissionCategory] = None,
+        resource_scope: Optional[ResourceScope] = None,
+        priority: int = 50
+    ) -> PermissionRule:
+        """Add a session-scoped rule granting permission for the remainder of the session."""
+        rule = PermissionRule(
+            decision=PermissionState.ALLOW,
+            tool_id=tool_id,
+            operation=operation,
+            resource=resource,
+            category=category,
+            resource_scope=resource_scope,
+            session_id=session_id,
+            priority=priority
+        )
+        self.add_rule(rule)
+        return rule
+
     def enforce(self, request: PermissionRequest) -> None:
         """Helper to evaluate and raise if denied or confirmation required."""
         state = self.evaluate_request(request)
@@ -100,3 +124,4 @@ class PermissionEngine(PermissionEngineInterface):
             raise PermissionDeniedError(f"Operation {request.operation} on {request.resource} is DENIED.")
         elif state == PermissionState.ASK:
             raise PermissionRequiredError(f"Operation {request.operation} on {request.resource} requires CONFIRMATION.")
+
