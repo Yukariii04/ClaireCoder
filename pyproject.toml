@@ -30,3 +30,6 @@ python_files = ["test_*.py"]
 
 [tool.mypy]
 strict = true
+
+[project.scripts]
+clairecoder = "clairecoder.__main__:main"

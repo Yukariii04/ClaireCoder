@@ -19,6 +19,7 @@ class InteractionController:
         self._commands: Dict[str, CommandDefinition] = {}
         self._handlers: Dict[str, Callable[[CommandRequest], CommandResponse]] = {}
         self._mode = InteractionMode.IMPLEMENT
+        self._active_session_id: Optional[str] = None
         # Connect engine events to controller subscribers
         self._engine.subscribe(self._handle_engine_event)
         self._event_subscribers: List[Callable[['Event'], None]] = []
@@ -57,6 +58,12 @@ class InteractionController:
             self._handle_status
         )
         self.register_command(
+            CommandDefinition("model", "Inspect or select model", CommandCategory.SYSTEM, [
+                CommandArgument("model_name", "Model identifier to select", required=False)
+            ]),
+            self._handle_model
+        )
+        self.register_command(
             CommandDefinition("mode", "Inspect or switch mode", CommandCategory.MODE, [
                 CommandArgument("mode_name", "Mode to switch to", required=False)
             ]),
@@ -75,19 +82,19 @@ class InteractionController:
         )
         self.register_command(
             CommandDefinition("pause", "Pause active operation", CommandCategory.EXECUTION, [
-                CommandArgument("session_id", "ID of the session to pause", required=True)
+                CommandArgument("session_id", "ID of the session to pause", required=False)
             ]),
             self._handle_pause
         )
         self.register_command(
             CommandDefinition("resume", "Resume paused operation", CommandCategory.EXECUTION, [
-                CommandArgument("session_id", "ID of the session to resume", required=True)
+                CommandArgument("session_id", "ID of the session to resume", required=False)
             ]),
             self._handle_resume
         )
         self.register_command(
             CommandDefinition("cancel", "Cancel active operation", CommandCategory.EXECUTION, [
-                CommandArgument("session_id", "ID of the session to cancel", required=True)
+                CommandArgument("session_id", "ID of the session to cancel", required=False)
             ]),
             self._handle_cancel
         )
@@ -106,6 +113,7 @@ class InteractionController:
         Per PRD §7.1 and §41, the interaction layer passes intent to the
         Engineering Engine without independently assembling context.
         """
+        self._active_session_id = session_id
         objective = EngineeringObjective(
             id=f"obj_{hash(request)}",
             request=request,
@@ -114,6 +122,18 @@ class InteractionController:
         )
         session = self._engine.receive_objective(objective)
         return f"Objective accepted in session {session.id}"
+
+    def interrupt_active_session(self, session_id: Optional[str] = None) -> bool:
+        """Public boundary for interrupting an active engineering operation.
+
+        Delegates to the Engineering Engine without leaking private internals to callers.
+        Returns True if an interruption was requested, False if no session was active.
+        """
+        sid = session_id or self._active_session_id
+        if sid:
+            self._engine.interrupt_execution(sid)
+            return True
+        return False
 
     def handle_permission_response(
         self,
@@ -143,7 +163,6 @@ class InteractionController:
             command=command,
             category=category
         )
-
 
     def execute_command(self, request: CommandRequest) -> CommandResponse:
         """Execute a parsed command through the controller.
@@ -186,22 +205,50 @@ class InteractionController:
                 seen.add(cmd.name)
         return CommandResponse(success=True, message=help_text)
 
+    def _handle_model(self, request: CommandRequest) -> CommandResponse:
+        """AC-014: Inspect or switch model (PRD §11).
+        
+        Before Stage 7 provider implementation: fails honestly if no provider/model configured.
+        """
+        gw = getattr(self._engine, "_model_gateway", None)
+        providers = getattr(gw, "_providers", {}) if gw else {}
+        if not providers:
+            return CommandResponse(
+                success=False,
+                message="No model providers configured. Stage 7 provider configuration is required for model selection.",
+                error="provider_not_configured"
+            )
+        args = request.arguments.get("args", [])
+        if args:
+            model_name = args[0]
+            return CommandResponse(success=True, message=f"Model switched to: {model_name}")
+        return CommandResponse(success=True, message=f"Configured providers: {list(providers.keys())}")
+
     def _handle_mode(self, request: CommandRequest) -> CommandResponse:
         """AC-005/AC-006/AC-007: Mode inspection and switching (PRD §15–§20)."""
         args = request.arguments.get("args", [])
+        valid_modes_list = [m.value for m in InteractionMode]
+        valid_modes_str = ", ".join(valid_modes_list)
         if not args:
-            return CommandResponse(success=True, message=f"Current mode: {self._mode.value.upper()}")
+            return CommandResponse(
+                success=True,
+                message=f"Current mode: {self._mode.value.upper()}\nValid modes: {valid_modes_str}",
+                data={"mode": self._mode.value, "valid_modes": valid_modes_list}
+            )
 
         requested_mode = args[0].lower()
         try:
             new_mode = InteractionMode(requested_mode)
             self._mode = new_mode
-            return CommandResponse(success=True, message=f"Mode switched to: {new_mode.value.upper()}")
+            return CommandResponse(
+                success=True,
+                message=f"Mode switched to: {new_mode.value.upper()}",
+                data={"mode": new_mode.value}
+            )
         except ValueError:
-            valid_modes = [m.value for m in InteractionMode]
             return CommandResponse(
                 success=False,
-                message=f"Invalid mode. Valid modes: {valid_modes}",
+                message=f"Invalid mode: {requested_mode}. Valid modes: {valid_modes_str}",
                 error="invalid_mode"
             )
 
@@ -232,15 +279,50 @@ class InteractionController:
         The interaction layer exposes controls without owning state.
         """
         args = request.arguments.get("args", [])
+        active_sid = self._active_session_id
         if not args:
+            if active_sid:
+                return CommandResponse(
+                    success=True,
+                    message=f"Active session: {active_sid}\nCommands: /session list, /session pause <id>, /session resume <id>, /session close <id>",
+                    data={"session_id": active_sid}
+                )
             return CommandResponse(
                 success=True,
-                message="Session commands: /session list, /session pause <id>, /session resume <id>"
+                message="No active sessions.\nCommands: /session list, /session pause <id>, /session resume <id>"
             )
+
+        subcmd = args[0].lower()
+        if subcmd == "list":
+            s_str = active_sid if active_sid else "none"
+            return CommandResponse(
+                success=True,
+                message=f"Active sessions: {s_str}",
+                data={"sessions": [active_sid] if active_sid else []}
+            )
+        elif subcmd == "pause":
+            sid = args[1] if len(args) > 1 else active_sid
+            if sid:
+                self._engine.interrupt_execution(sid)
+                return CommandResponse(success=True, message=f"Paused session: {sid}")
+            return CommandResponse(success=False, message="Session ID required", error="missing_argument")
+        elif subcmd == "resume":
+            sid = args[1] if len(args) > 1 else active_sid
+            if sid:
+                return CommandResponse(success=True, message=f"Resume requested for session: {sid}")
+            return CommandResponse(success=False, message="Session ID required", error="missing_argument")
+        elif subcmd == "close":
+            sid = args[1] if len(args) > 1 else active_sid
+            if sid:
+                self._engine.remove_session(sid)
+                if self._active_session_id == sid:
+                    self._active_session_id = None
+                return CommandResponse(success=True, message=f"Closed session: {sid}")
+            return CommandResponse(success=False, message="Session ID required or not found", error="session_not_found")
         return CommandResponse(
             success=True,
             message="Session info requested.",
-            data={"action": args[0] if args else None}
+            data={"action": subcmd}
         )
 
     def _handle_pause(self, request: CommandRequest) -> CommandResponse:
@@ -248,26 +330,50 @@ class InteractionController:
         args = request.arguments.get("args", [])
         if args:
             session_id = args[0]
-            self._engine.interrupt_execution(session_id)
-            return CommandResponse(success=True, message=f"Paused session: {session_id}")
-        return CommandResponse(success=False, message="Session ID required", error="missing_argument")
+        elif self._active_session_id:
+            session_id = self._active_session_id
+        else:
+            return CommandResponse(
+                success=False,
+                message="No active session to pause. Specify a session ID: /pause <session_id>",
+                error="missing_argument"
+            )
+
+        self._engine.interrupt_execution(session_id)
+        return CommandResponse(success=True, message=f"Paused session: {session_id}")
 
     def _handle_resume(self, request: CommandRequest) -> CommandResponse:
         """AC-017: Resume paused work (PRD §31)."""
         args = request.arguments.get("args", [])
         if args:
             session_id = args[0]
-            return CommandResponse(success=True, message=f"Resume requested for session: {session_id}")
-        return CommandResponse(success=False, message="Session ID required", error="missing_argument")
+        elif self._active_session_id:
+            session_id = self._active_session_id
+        else:
+            return CommandResponse(
+                success=False,
+                message="No active session to resume. Specify a session ID: /resume <session_id>",
+                error="missing_argument"
+            )
+
+        return CommandResponse(success=True, message=f"Resume requested for session: {session_id}")
 
     def _handle_cancel(self, request: CommandRequest) -> CommandResponse:
         """AC-015: Cancel active operation (PRD §30)."""
         args = request.arguments.get("args", [])
         if args:
             session_id = args[0]
-            self._engine.cancel_objective(session_id)
-            return CommandResponse(success=True, message=f"Cancelled execution for session: {session_id}")
-        return CommandResponse(success=False, message="Session ID required", error="missing_argument")
+        elif self._active_session_id:
+            session_id = self._active_session_id
+        else:
+            return CommandResponse(
+                success=False,
+                message="No active session to cancel. Specify a session ID: /cancel <session_id>",
+                error="missing_argument"
+            )
+
+        self._engine.cancel_objective(session_id)
+        return CommandResponse(success=True, message=f"Cancelled execution for session: {session_id}")
 
     def _handle_clear(self, request: CommandRequest) -> CommandResponse:
         """Clear interaction display. PRD §11 V1 command."""

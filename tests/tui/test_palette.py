@@ -27,7 +27,9 @@ def test_command_palette_categories_render_full():
     assert "UI / PRESENTATION" in text
     assert "/tree" in text
     assert "/review" in text
-    assert "Type / or ? to open this menu" in text
+    assert "↑/↓ select" in text
+    assert "Enter open" in text
+    assert "Esc back" in text
 
 def test_command_palette_command_classification():
     """Verify that /help is classified as Application/Interaction (not UI-owned) per CC-PRD-011."""
@@ -42,29 +44,38 @@ def test_command_palette_command_classification():
     # UI presentation commands
     assert cmd_map["/review"].category == "UI / PRESENTATION"
     assert cmd_map["/review"].is_ui_command is True
-    assert cmd_map["/compact"].category == "UI / PRESENTATION"
-    assert cmd_map["/compact"].is_ui_command is True
     assert cmd_map["/tree"].category == "UI / PRESENTATION"
     assert cmd_map["/tree"].is_ui_command is True
 
 
-def test_command_palette_search_filter():
-    """Verify typing updates filter and limits matches in real time."""
+def test_command_palette_navigation_keys():
+    """Verify navigation with Up/Down, PageUp/PageDown, Home/End."""
     palette = CommandPalette()
-    assert len(palette.filtered_commands) == len(palette.commands)
+    assert palette.selected_index == 0
 
-    # Type "rev"
-    palette.type_filter("r")
-    palette.type_filter("e")
-    palette.type_filter("v")
-    assert palette.filter_text == "rev"
-    filtered = palette.filtered_commands
-    assert any(c.name == "/review" for c in filtered)
-    assert not any(c.name == "/exit" for c in filtered)
+    # Down
+    palette.handle_key("down")
+    assert palette.selected_index == 1
 
-    # Backspace
-    palette.backspace_filter()
-    assert palette.filter_text == "re"
+    # Up
+    palette.handle_key("up")
+    assert palette.selected_index == 0
+
+    # End
+    palette.handle_key("end")
+    assert palette.selected_index == len(palette.commands) - 1
+
+    # Home
+    palette.handle_key("home")
+    assert palette.selected_index == 0
+
+    # PageDown
+    palette.handle_key("pagedown")
+    assert palette.selected_index == 5
+
+    # PageUp
+    palette.handle_key("pageup")
+    assert palette.selected_index == 0
 
 def test_command_palette_navigation_and_selection():
     """Verify navigation and Enter selection invokes on_select callback."""

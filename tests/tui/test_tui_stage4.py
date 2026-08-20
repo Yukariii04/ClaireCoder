@@ -29,9 +29,16 @@ def test_shortcut_ctrl_r_opens_review_overlay():
     assert not app.prompt.suspended
 
 def test_shortcut_question_mark_opens_command_palette():
-    """Verify '?' opens the Command Palette overlay."""
+    """Verify '?' is ordinary prompt text and '/commands' opens the Command Palette overlay."""
     app = TuiApplication()
     app.handle_key("?")
+    assert app.prompt.get_text() == "?"
+    assert app.state == InputState.NORMAL
+    assert not app.is_palette_open
+
+    # Submit /commands
+    app.prompt.clear()
+    app.submit("/commands")
     assert app.state == InputState.OVERLAY
     assert app.active_overlay == "palette"
     assert app.is_palette_open
@@ -43,7 +50,7 @@ def test_shortcut_question_mark_opens_command_palette():
     assert not app.is_palette_open
 
 def test_help_command_routes_through_interaction_controller():
-    """Verify /help routes through InteractionController and TUI presents the palette in response."""
+    """Verify /help routes through InteractionController and outputs result."""
     mock_engine = Mock()
     controller = InteractionController(engine=mock_engine)
     app = TuiApplication()
@@ -52,10 +59,9 @@ def test_help_command_routes_through_interaction_controller():
     # Submit /help via prompt
     app.submit("/help")
 
-    # Verify command palette is open in TUI
-    assert app.is_palette_open
-    assert app.state == InputState.OVERLAY
-    assert app.active_overlay == "palette"
+    # Verify /help activity recorded in transcript
+    activities = app.transcript.get_activities()
+    assert any("help" in a.title.lower() for a in activities)
 
 def test_help_routing_interaction_controller_invoked():
     """Explicitly verify that InteractionController.execute_command receives /help."""
@@ -71,7 +77,8 @@ def test_help_routing_interaction_controller_invoked():
         assert isinstance(call_args, CommandRequest)
         assert call_args.command == "help"
 
-    assert app.is_palette_open
+    activities = app.transcript.get_activities()
+    assert any("help" in a.title.lower() for a in activities)
 
 def test_ui_command_review_via_prompt():
     """Verify typing /review opens review overlay directly (UI presentation owned)."""
@@ -89,19 +96,18 @@ def test_ui_command_review_via_prompt():
     assert app.state == InputState.OVERLAY
     assert app.active_overlay == "review"
 
-def test_ui_command_compact_via_prompt():
-    """Verify typing /compact toggles compact mode directly (UI presentation owned)."""
+def test_ui_command_tree_via_prompt():
+    """Verify typing /tree opens file tree directly (UI presentation owned)."""
     mock_engine = Mock()
     controller = InteractionController(engine=mock_engine)
     app = TuiApplication()
     app.connect_controller(controller)
-    app.terminal.force_mode(TerminalMode.FULL)
 
     with patch.object(controller, "execute_command", wraps=controller.execute_command) as mock_exec:
-        app.submit("/compact")
+        app.submit("/tree")
         mock_exec.assert_not_called()
 
-    assert app.terminal.mode == TerminalMode.COMPACT
+    assert app.is_tree_open
 
 def test_application_command_routes_through_controller():
     """Verify application commands (e.g. /status) route through InteractionController."""
@@ -143,8 +149,9 @@ def test_palette_selection_ui_command():
     app = TuiApplication()
     app.open_palette()
 
-    # Filter to review
-    app.command_palette.type_filter("review")
+    # Select /review
+    idx = next(i for i, c in enumerate(app.command_palette.commands) if c.name == "/review")
+    app.command_palette.selected_index = idx
     assert app.command_palette.selected_command.name == "/review"
 
     app.handle_key("Enter")

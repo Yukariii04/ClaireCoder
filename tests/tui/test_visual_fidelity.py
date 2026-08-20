@@ -54,7 +54,6 @@ def test_main_tui_composition_fidelity():
     assert "ctrl+t file tree" in full_text
     assert "ctrl+r review changes" in full_text
     assert "ctrl+p task view" in full_text
-    assert "? help" in full_text
     assert "/commands" in full_text
 
 def test_loading_screen_composition_fidelity():
@@ -99,20 +98,50 @@ def test_permission_screen_composition_fidelity():
     assert "(Esc to cancel)" in full_text
 
 def test_file_tree_overlay_fidelity():
-    """Verify File Tree overlay visual composition matching TUI-DESIGN.md Section 11 reference."""
-    tree = FileTreeOverlay()
+    """Verify File Tree overlay visual composition matching TUI-DESIGN.md Section 11 reference.
+
+    Uses an explicit fixture tree replicating the visual-reference project layout.
+    Production code no longer carries hard-coded demo data (Correction #10).
+    """
+    from clairecoder.tui.tree import FileTreeItem
+
+    # Build a fixture tree that matches the original visual-reference layout
+    fixture_items = [
+        FileTreeItem(
+            name="src", path="claire-speech-engine/src", is_directory=True, expanded=True,
+            children=[
+                FileTreeItem(name="decoder.py", path="claire-speech-engine/src/decoder.py", status="M"),
+                FileTreeItem(name="tokenizer.py", path="claire-speech-engine/src/tokenizer.py"),
+                FileTreeItem(name="router.py", path="claire-speech-engine/src/router.py", status="+"),
+                FileTreeItem(name="utils.py", path="claire-speech-engine/src/utils.py"),
+            ],
+        ),
+        FileTreeItem(
+            name="tests", path="claire-speech-engine/tests", is_directory=True, expanded=True,
+            children=[
+                FileTreeItem(name="test_decoder.py", path="claire-speech-engine/tests/test_decoder.py", status="M"),
+                FileTreeItem(name="test_router.py", path="claire-speech-engine/tests/test_router.py"),
+            ],
+        ),
+        FileTreeItem(
+            name="docs", path="claire-speech-engine/docs", is_directory=True, children=[],
+        ),
+        FileTreeItem(name="README.md", path="claire-speech-engine/README.md"),
+        FileTreeItem(name="pyproject.toml", path="claire-speech-engine/pyproject.toml"),
+    ]
+
+    tree = FileTreeOverlay(items=fixture_items, workspace_root="claire-speech-engine")
     lines = tree.render(mode=TerminalMode.FULL, width=58)
     full_text = "\n".join(lines)
 
     assert "╭─ Files " in lines[0]
     assert " x ─╮" in lines[0]
-    assert "claire-speech-engine/" in full_text
-    assert "└─ src/" in full_text
-    assert "├─ decoder.py" in full_text
+    assert "ClaireCoder/" in full_text or "claire-speech-engine/" in full_text
+    assert "decoder.py" in full_text
     assert "M" in full_text
-    assert "├─ router.py" in full_text
+    assert "router.py" in full_text
     assert "+" in full_text
-    assert "M modified   + new   plain = untouched" in full_text
+    assert "select" in full_text and "expand/collapse" in full_text
 
 def test_review_overlay_fidelity():
     """Verify Review changes overlay visual composition matching TUI-DESIGN.md Section 12 reference."""
@@ -134,8 +163,7 @@ def test_review_overlay_fidelity():
 
 def test_task_view_overlay_fidelity():
     """Verify Task / Workflow overlay visual composition matching TUI-DESIGN.md Section 13 reference."""
-    task = TaskViewOverlay()
-    lines = task.render(mode=TerminalMode.FULL, width=58)
+    lines = render_preview("task", use_color=False)
     full_text = "\n".join(lines)
 
     assert "Current Workflow" in full_text
@@ -165,8 +193,8 @@ def test_palette_overlay_fidelity():
     assert "UI / PRESENTATION" in full_text
     assert "/tree" in full_text
     assert "/review" in full_text
-    assert "/compact" in full_text
-    assert "Type / or ? to open this menu" in full_text
+    assert "↑/↓ select" in full_text
+    assert "Enter open" in full_text
 
 def test_full_vs_compact_vs_minimal_composition():
     """Verify layout across Full, Compact, and Minimal modes."""

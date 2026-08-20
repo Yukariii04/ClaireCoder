@@ -8,6 +8,7 @@ from .terminal import TerminalCapability
 from .activity import ActivityModel, ActivityType, ActivityState, DiffInfo, DiffLine
 from .diff import FileDiff, DiffRenderer
 from .loading import LoadingScreen
+from .task import WorkflowTaskItem
 
 def create_preview_app(mode: Optional[TerminalMode] = None) -> TuiApplication:
     """Creates a pre-populated TuiApplication with realistic mock session state matching reference."""
@@ -22,6 +23,17 @@ def create_preview_app(mode: Optional[TerminalMode] = None) -> TuiApplication:
     app.header.session_id = "main"
     app.header.task_progress = "2/5"
     app.header.context_usage = "12.4k/200k"
+
+    # Populate Task View for preview
+    app.task_view.tasks = [
+        WorkflowTaskItem(1, "Understand objective", "✓"),
+        WorkflowTaskItem(2, "Plan changes", "✓"),
+        WorkflowTaskItem(3, "Implement changes", "▶"),
+        WorkflowTaskItem(4, "Verify", "○"),
+        WorkflowTaskItem(5, "Complete", "○"),
+    ]
+    app.task_view.progress_pct = 40
+    app.task_view.objective = "Add streaming decode support with fallback to greedy decoding"
 
     # 2. Populate Transcript
     # Activity 1: Reading

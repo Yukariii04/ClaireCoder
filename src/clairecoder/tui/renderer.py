@@ -10,6 +10,12 @@ class ActivityRenderer:
         # Check for Claire assistant message (text persona)
         if activity.type == ActivityType.MESSAGE and activity.title.lower() in ("claire", "assistant", "clairecoder"):
             return ActivityRenderer._render_claire_message(activity, width=width, use_color=use_color)
+        elif activity.type == ActivityType.MESSAGE and activity.title.lower() in ("user", "human"):
+            detail_lines = activity.detail.splitlines() if activity.detail else [""]
+            lines = [f"> {detail_lines[0]}"]
+            for l in detail_lines[1:]:
+                lines.append(f"  {l}")
+            return lines
 
         # Standard agent activity
         marker = "> ◌"

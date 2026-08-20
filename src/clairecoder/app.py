@@ -32,21 +32,24 @@ class ClaireCoderV1:
     
     def __init__(
         self,
-        model_gateway: ModelGatewayInterface,
-        permission_engine: PermissionEngine,
-        tool_executor: ToolExecutor,
-        skill_registry: SkillRegistry,
-        workflow_manager: WorkflowManager,
-        execution_manager: ExecutionManager,
-        verification_engine: VerificationEngine
+        model_gateway: Optional[ModelGatewayInterface] = None,
+        permission_engine: Optional[PermissionEngine] = None,
+        tool_executor: Optional[ToolExecutor] = None,
+        skill_registry: Optional[SkillRegistry] = None,
+        workflow_manager: Optional[WorkflowManager] = None,
+        execution_manager: Optional[ExecutionManager] = None,
+        verification_engine: Optional[VerificationEngine] = None
     ):
-        self.model_gateway = model_gateway
-        self.permission_engine = permission_engine
-        self.tool_executor = tool_executor
-        self.skill_registry = skill_registry
-        self.workflow_manager = workflow_manager
-        self.execution_manager = execution_manager
-        self.verification_engine = verification_engine
+        from clairecoder.gateway.gateway import ModelGateway
+        from clairecoder.tools.registry import ToolRegistry
+
+        self.model_gateway = model_gateway if model_gateway is not None else ModelGateway()
+        self.permission_engine = permission_engine if permission_engine is not None else PermissionEngine()
+        self.tool_executor = tool_executor if tool_executor is not None else ToolExecutor(ToolRegistry(), self.permission_engine)
+        self.skill_registry = skill_registry if skill_registry is not None else SkillRegistry()
+        self.workflow_manager = workflow_manager if workflow_manager is not None else WorkflowManager()
+        self.execution_manager = execution_manager if execution_manager is not None else ExecutionManager()
+        self.verification_engine = verification_engine if verification_engine is not None else VerificationEngine()
         
         # Core engineering orchestrator
         self.engineering_engine = EngineeringEngine(
@@ -58,6 +61,11 @@ class ClaireCoderV1:
         # Interaction Layer
         self.interaction_controller = InteractionController(engine=self.engineering_engine)
         self.planner = Planner()
+
+    @classmethod
+    def create_default(cls, model_gateway: Optional[ModelGatewayInterface] = None) -> 'ClaireCoderV1':
+        """Factory method to construct a default ClaireCoderV1 application instance."""
+        return cls(model_gateway=model_gateway)
         
     def create_session(self, session_id: str) -> str:
         """Create a new engineering session."""
@@ -68,6 +76,16 @@ class ClaireCoderV1:
         )
         session = self.engineering_engine.receive_objective(objective)
         return session.id
+
+    def check_configuration_status(self) -> str:
+        """Determine application configuration state: 'configured', 'not_configured', or 'needs_repair'.
+        
+        Per CC-PRD-011 and Stage 6 architecture:
+        Provides an authoritative status query without making TUI state authoritative.
+        """
+        if not hasattr(self.model_gateway, "_providers") or not self.model_gateway._providers:
+            return "not_configured"
+        return "configured"
 
     def submit_objective(self, session_id: str, objective_text: str) -> str:
         """Process a natural language request by creating an objective for the engine."""
@@ -336,5 +354,5 @@ class ClaireCoderV1:
         self.workflow_manager.remove_workflow(workflow_id)
 
     def get_version(self) -> str:
-        """Get the V1 version."""
-        return "1.0.0"
+        """Get the application version."""
+        return "0.1.0"

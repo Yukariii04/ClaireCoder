@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 from .states import TerminalMode
+from .canvas import visible_length
 
 @dataclass
 class WorkflowTaskItem:
@@ -20,10 +21,10 @@ class TaskViewOverlay:
         WorkflowTaskItem(5, "Complete", "○"),
     ]
 
-    def __init__(self, tasks: Optional[List[WorkflowTaskItem]] = None, progress_pct: int = 40, objective: str = "") -> None:
-        self.tasks = tasks or list(self.DEFAULT_TASKS)
+    def __init__(self, tasks: Optional[List[WorkflowTaskItem]] = None, progress_pct: int = 0, objective: str = "") -> None:
+        self.tasks = tasks if tasks is not None else []
         self.progress_pct = progress_pct
-        self.objective = objective or "Add streaming decode support with fallback to greedy decoding"
+        self.objective = objective
         self.on_close: Optional[Callable[[], None]] = None
 
     def handle_key(self, key: str) -> bool:
@@ -40,21 +41,29 @@ class TaskViewOverlay:
         inner_w = card_w - 4
 
         def frame_line(content: str = "") -> str:
-            safe = content[:inner_w]
-            return f"│ {safe}".ljust(card_w - 1) + "│"
+            vis = visible_length(content)
+            if vis > inner_w:
+                content = content[:inner_w]
+                vis = visible_length(content)
+            pad = max(0, inner_w - vis)
+            return f"│ {content}{' ' * pad} │"
 
         lines: List[str] = []
 
         # Top border
-        top_bar = f"╭─ Current Workflow " + ("─" * max(0, card_w - 25)) + " x ─╮"
+        pad_top = max(0, card_w - len("╭─ Current Workflow ") - len(" x ─╮"))
+        top_bar = f"╭─ Current Workflow " + ("─" * pad_top) + " x ─╮"
         lines.append(top_bar)
         lines.append(frame_line(""))
 
         # Task list
-        for t in self.tasks:
-            pad = max(2, inner_w - 4 - len(t.title) - len(t.marker) - 2)
-            row_str = f"{t.number:<3} {t.title}{' ' * pad}{t.marker}"
-            lines.append(frame_line(row_str))
+        if self.tasks:
+            for t in self.tasks:
+                pad = max(2, inner_w - 4 - len(t.title) - len(t.marker) - 2)
+                row_str = f"{t.number:<3} {t.title}{' ' * pad}{t.marker}"
+                lines.append(frame_line(row_str))
+        else:
+            lines.append(frame_line("No active workflow tasks."))
 
         lines.append(frame_line(""))
         lines.append(frame_line("Task Progress"))
@@ -67,9 +76,12 @@ class TaskViewOverlay:
         lines.append(frame_line(bar_str))
 
         lines.append(frame_line(""))
-        lines.append(frame_line("Objective:"))
-        for obj_line in self.objective.splitlines():
-            lines.append(frame_line(obj_line))
+        if self.objective:
+            lines.append(frame_line("Objective:"))
+            for obj_line in self.objective.splitlines():
+                lines.append(frame_line(f"  {obj_line}"))
+        else:
+            lines.append(frame_line("Objective: None"))
 
         lines.append(frame_line(""))
         lines.append("╰" + ("─" * (card_w - 2)) + "╯")

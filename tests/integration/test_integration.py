@@ -116,8 +116,8 @@ def v1_app():
     )
     return app
 
-def test_v1_startup_and_version(v1_app):
-    assert v1_app.get_version() == "1.0.0"
+def test_app_version(v1_app):
+    assert v1_app.get_version() == "0.1.0"
 
 def test_v1_session_creation(v1_app):
     session_id = v1_app.create_session("s1")

@@ -17,3 +17,5 @@ venv/
 clairecoder_*.md
 phase_*.md
 *.txt
+*png
+.clairecoder/

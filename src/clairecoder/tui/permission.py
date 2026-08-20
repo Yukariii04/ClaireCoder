@@ -142,8 +142,14 @@ class PermissionSurface:
         else:
             self.active_request = None
             self.diff_expanded = False
-            self.diff_message = None
-        return resolved
+    def resolve(self, request_id: str) -> Optional[PermissionRequestViewModel]:
+        """Resolves/removes a request by ID and advances the pending queue."""
+        if self.active_request and self.active_request.request_id == request_id:
+            return self.clear_active()
+        for i, p in enumerate(self.pending_requests):
+            if p.request_id == request_id:
+                return self.pending_requests.pop(i)
+        return None
 
     def register_decision_callback(self, cb: Callable[[str, PermissionDecision], None]) -> None:
         """Registers a decision callback."""
