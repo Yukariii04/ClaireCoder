@@ -3,17 +3,18 @@ from typing import List, Dict, Any, Optional
 import urllib.request
 import urllib.error
 
+from clairecoder.gateway.discovery import normalize_credential, DEFAULT_USER_AGENT, _parse_http_error_body
 from clairecoder.gateway.interfaces import ProviderAdapterInterface
 from clairecoder.gateway.types import Model, ModelRequest, ModelResponse, Capability, ModelError, ErrorCategory
 
 class OpenAICompatibleAdapter(ProviderAdapterInterface):
     """
-    Adapter for OpenAI-compatible APIs (OpenAI, Local Runtimes like vLLM/LMStudio).
+    Adapter for OpenAI-compatible APIs (OpenAI, Groq, OpenRouter, vLLM/LMStudio).
     Supports injecting an optional `http_client` mock for testing.
     """
     def __init__(self, provider_id: str = "openai-compatible", auth_token: Optional[str] = None, http_client: Any = None):
         self._provider_id = provider_id
-        self._auth_token = auth_token
+        self._auth_token = normalize_credential(auth_token)
         self._http_client = http_client
 
     @property
@@ -32,13 +33,13 @@ class OpenAICompatibleAdapter(ProviderAdapterInterface):
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             with e:
-                error_body = e.read().decode("utf-8")
-                if e.code in (401, 403):
-                    raise ModelError(ErrorCategory.AUTHENTICATION, f"Authentication failed: {error_body}")
-                elif e.code == 429:
-                    raise ModelError(ErrorCategory.RATE_LIMITING, f"Rate limited: {error_body}", is_recoverable=True)
-                else:
-                    raise ModelError(ErrorCategory.ENDPOINT_FAILURE, f"HTTP {e.code}: {error_body}")
+                err_msg = _parse_http_error_body(e, self._provider_id)
+            if e.code in (401, 403):
+                raise ModelError(ErrorCategory.AUTHENTICATION, f"Authentication failed (HTTP {e.code}): {err_msg}")
+            elif e.code == 429:
+                raise ModelError(ErrorCategory.RATE_LIMITING, f"Rate limited: {err_msg}", is_recoverable=True)
+            else:
+                raise ModelError(ErrorCategory.ENDPOINT_FAILURE, f"HTTP {e.code}: {err_msg}")
         except urllib.error.URLError as e:
             raise ModelError(ErrorCategory.NETWORK_FAILURE, f"Network error: {str(e)}", is_recoverable=True)
 
@@ -51,13 +52,13 @@ class OpenAICompatibleAdapter(ProviderAdapterInterface):
             return urllib.request.urlopen(req)
         except urllib.error.HTTPError as e:
             with e:
-                error_body = e.read().decode("utf-8")
-                if e.code in (401, 403):
-                    raise ModelError(ErrorCategory.AUTHENTICATION, f"Authentication failed: {error_body}")
-                elif e.code == 429:
-                    raise ModelError(ErrorCategory.RATE_LIMITING, f"Rate limited: {error_body}", is_recoverable=True)
-                else:
-                    raise ModelError(ErrorCategory.ENDPOINT_FAILURE, f"HTTP {e.code}: {error_body}")
+                err_msg = _parse_http_error_body(e, self._provider_id)
+            if e.code in (401, 403):
+                raise ModelError(ErrorCategory.AUTHENTICATION, f"Authentication failed (HTTP {e.code}): {err_msg}")
+            elif e.code == 429:
+                raise ModelError(ErrorCategory.RATE_LIMITING, f"Rate limited: {err_msg}", is_recoverable=True)
+            else:
+                raise ModelError(ErrorCategory.ENDPOINT_FAILURE, f"HTTP {e.code}: {err_msg}")
         except urllib.error.URLError as e:
             raise ModelError(ErrorCategory.NETWORK_FAILURE, f"Network error: {str(e)}", is_recoverable=True)
 
@@ -67,7 +68,8 @@ class OpenAICompatibleAdapter(ProviderAdapterInterface):
             url = f"{url}/chat/completions"
 
         headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": DEFAULT_USER_AGENT,
         }
         # Merge model-specific headers
         headers.update(model.endpoint.headers)
