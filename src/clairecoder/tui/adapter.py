@@ -11,9 +11,21 @@ class PresentationAdapter:
     Relies on semantic event data.
     """
     
+    # Internal lifecycle events — consumed for state synchronization only,
+    # never rendered as user-facing transcript activity.
+    _INTERNAL_EVENTS = frozenset({
+        "STREAMING_CHUNK", "RESPONSE_COMPLETE", "MODEL_SWITCHED", "MODE_CHANGED",
+        "RUN_STATE_CHANGED", "RUN_STARTED", "RUN_COMPLETED", "RUN_FAILED", "RUN_CANCELLED",
+    })
+
     @staticmethod
-    def event_to_activity(event: Event) -> ActivityModel:
+    def event_to_activity(event: Event) -> Optional[ActivityModel]:
         event_name = event.name.upper()
+
+        # Internal / TUI-handled events — no user-facing activity
+        if event_name in PresentationAdapter._INTERNAL_EVENTS:
+            return None
+
         activity = ActivityModel(title=f"Event {event_name}")
         
         # Tool Activity mapping
