@@ -17,7 +17,10 @@ def run_direct(
 ) -> int:
     """Execute direct non-interactive objective submission via ClaireCoderV1 application."""
     if app is None:
-        app = ClaireCoderV1()
+        app = ClaireCoderV1(workspace_root=os.getcwd())
+
+    # Load persisted provider configuration
+    app.load_providers_from_config()
 
     sid = session_id or f"cli_{uuid.uuid4().hex[:8]}"
     try:
@@ -27,7 +30,7 @@ def run_direct(
         app.create_session(sid)
 
     print(f"Executing objective: {objective}")
-    app.submit_objective(sid, objective)
+    app.submit_objective(sid, objective, start_background=False)
 
     try:
         app.run(sid)
@@ -39,6 +42,10 @@ def run_direct(
         print(f"Model error: {me}", file=sys.stderr)
         print(
             "Stage 7 provider configuration is required for live external model execution.",
+            file=sys.stderr,
+        )
+        print(
+            "Run 'clairecoder' interactively to configure a model provider.",
             file=sys.stderr,
         )
         return 1
@@ -61,7 +68,10 @@ def run_interactive(
 ) -> int:
     """Launch persistent interactive TUI session delegated to TuiApplication."""
     if app is None:
-        app = ClaireCoderV1()
+        app = ClaireCoderV1(workspace_root=os.getcwd())
+
+    # Load persisted provider configuration into ModelGateway
+    app.load_providers_from_config()
 
     sid = session_id or f"cli_{uuid.uuid4().hex[:8]}"
     try:
@@ -71,7 +81,26 @@ def run_interactive(
 
     tui = TuiApplication(workspace_root=os.getcwd())
     tui.connect_controller(app.interaction_controller)
+    tui.connect_config_manager(app.config_manager)
+    tui.register_runtime_sync_callback(app.load_providers_from_config)
+
+    # Set active session on the controller
+    app.interaction_controller._active_session_id = sid
     tui.header.session_id = sid
+
+    # Synchronize header with active model info from config
+    active = app.config_manager.get_active()
+    if active.get("model_id"):
+        tui.header.model = active["model_id"]
+        # Update context capacity from the registered model
+        registered = getattr(app.model_gateway, "_models", {})
+        model_obj = registered.get(active["model_id"])
+        if model_obj and hasattr(model_obj, "context_capacity") and model_obj.context_capacity:
+            app.interaction_controller._context_capacity = model_obj.context_capacity
+
+    # Synchronize mode from the controller
+    tui.header.mode = app.interaction_controller.mode.value.upper()
+
     return tui.run(input_source=input_source)
 
 
