@@ -4,3 +4,7 @@ from .types import (
 )
 from .interfaces import ModelGatewayInterface, ProviderAdapterInterface
 from .gateway import ModelGateway
+from .config import ProviderProfile, ProviderCategory, AdapterType, PROVIDER_REGISTRY
+from .credentials import CredentialStore
+from .manager import ConfigurationManager
+from .discovery import discover_models, validate_provider, normalize_credential, get_credential_fingerprint

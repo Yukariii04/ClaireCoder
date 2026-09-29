@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from .types import Model, ModelRequest, ModelResponse, Capability, ModelError, ErrorCategory, ModelProfile
 from .interfaces import ModelGatewayInterface, ProviderAdapterInterface
 
@@ -7,6 +7,7 @@ class ModelGateway(ModelGatewayInterface):
         self._adapters: Dict[str, ProviderAdapterInterface] = {}
         self._models: Dict[str, Model] = {}
         self._profiles: Dict[str, ModelProfile] = {}
+        self.last_request_debug: Optional[Dict[str, Any]] = None
 
     def register_adapter(self, adapter: ProviderAdapterInterface) -> None:
         self._adapters[adapter.provider_id] = adapter
@@ -27,13 +28,22 @@ class ModelGateway(ModelGatewayInterface):
         return self.get_model(profile.model_id)
 
     def get_model(self, model_id: str) -> Model:
-        model = self._models.get(model_id)
-        if not model:
+        if not model_id:
             raise ModelError(
-                category=ErrorCategory.MODEL_FAILURE,
-                message=f"Model not found: {model_id}"
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                message="No active model configured. Use '/model' or the setup wizard to select a model."
             )
-        return model
+        if model_id in self._models:
+            return self._models[model_id]
+        if "/" in model_id:
+            pid, mid = model_id.split("/", 1)
+            candidate = self._models.get(mid)
+            if candidate and candidate.provider and candidate.provider.id == pid:
+                return candidate
+        raise ModelError(
+            category=ErrorCategory.MODEL_FAILURE,
+            message=f"Model not found: {model_id}"
+        )
 
     def check_capability(self, model_id: str, capability: Capability) -> bool:
         model = self.get_model(model_id)
@@ -51,6 +61,14 @@ class ModelGateway(ModelGatewayInterface):
                 provider_id=model.provider.id,
                 model_id=request.model_id
             )
+
+        # Record safe debug inspection hook
+        self.last_request_debug = {
+            "provider_id": model.provider.id,
+            "endpoint": model.endpoint.url,
+            "model_id": request.model_id,
+            "adapter": adapter.__class__.__name__,
+        }
             
         try:
             # Delegate to provider adapter

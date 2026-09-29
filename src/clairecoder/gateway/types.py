@@ -73,21 +73,29 @@ class ErrorCategory(str, Enum):
     AUTHENTICATION = "authentication"
     ENDPOINT_FAILURE = "endpoint_failure"
     NETWORK_FAILURE = "network_failure"
+    TIMEOUT = "timeout"
     RATE_LIMITING = "rate_limiting"
     MODEL_FAILURE = "model_failure"
     CAPABILITY_MISMATCH = "capability_mismatch"
+    CONFIGURATION_ERROR = "configuration_error"
     UNKNOWN = "unknown"
 
 class ModelError(Exception):
     def __init__(
         self,
-        category: ErrorCategory,
-        message: str,
+        category: Any = ErrorCategory.CONFIGURATION_ERROR,
+        message: Optional[str] = None,
         provider_id: Optional[str] = None,
         model_id: Optional[str] = None,
         is_recoverable: bool = False,
         provider_specific: Optional[Dict[str, Any]] = None
     ):
+        if message is None:
+            if isinstance(category, str):
+                message = category
+                category = ErrorCategory.CONFIGURATION_ERROR
+            else:
+                message = str(category)
         super().__init__(message)
         self.category = category
         self.message = message
