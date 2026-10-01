@@ -12,6 +12,7 @@ class TranscriptView:
         self._correlation_map: Dict[str, ActivityModel] = {}
         self.scroll_position: int = 0
         self.height: int = 10
+        self.render_width: int = 68  # Updated by TUI on resize
         self._follow_tail: bool = True
         self._next_order: int = 0
 
@@ -98,7 +99,7 @@ class TranscriptView:
     def _get_rendered_lines(self) -> List[str]:
         lines = []
         for act in self.activities:
-            lines.extend(ActivityRenderer.render(act))
+            lines.extend(ActivityRenderer.render(act, width=self.render_width))
         return lines
         
     def get_visible_lines(self, padded: bool = False) -> List[str]:
@@ -124,6 +125,10 @@ class TranscriptView:
             self._follow_tail = False
         else:
             self._follow_tail = True
+
+    def is_at_bottom(self) -> bool:
+        """Returns True if the transcript view is scrolled to the bottom / follow-tail is active."""
+        return self._follow_tail or self.scroll_position >= self._max_scroll()
 
     def scroll_up(self, amount: int = 1) -> None:
         """Scrolls up by amount, disengaging follow-tail if scrolled away from bottom."""
