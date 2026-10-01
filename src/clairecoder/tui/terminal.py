@@ -10,12 +10,18 @@ class TerminalCapability:
 
     def __init__(
         self,
-        width: int = 104,
-        height: int = 30,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
         mode: Optional[TerminalMode] = None,
     ) -> None:
-        self.width = width
-        self.height = height
+        if width is None or height is None:
+            import shutil
+            cols, rows = shutil.get_terminal_size((104, 30))
+            self.width = width if width is not None else cols
+            self.height = height if height is not None else rows
+        else:
+            self.width = width
+            self.height = height
         self.colors = True
         self.mode = mode
 
@@ -220,6 +226,7 @@ class InputDecoder:
         "\x14": "ctrl+t",
         "\x12": "ctrl+r",
         "\x10": "ctrl+p",
+        "\x16": "ctrl+v",
     }
 
     # Canonical named key aliases
@@ -230,7 +237,8 @@ class InputDecoder:
         "home", "end", "insert", "delete",
         "enter", "return", "backspace", "tab",
         "escape", "esc",
-        "ctrl+c", "ctrl+t", "ctrl+r", "ctrl+p",
+        "ctrl+c", "ctrl+t", "ctrl+r", "ctrl+p", "ctrl+v",
+        "shift+insert", "shift_insert", "paste",
     }
 
     @classmethod
@@ -258,6 +266,10 @@ class InputDecoder:
                 normalized = "enter"
             elif normalized in ("esc",):
                 normalized = "escape"
+            elif normalized in ("paste", "ctrl_v"):
+                normalized = "ctrl+v"
+            elif normalized in ("shift_insert",):
+                normalized = "shift+insert"
             return KeyEvent(normalized, raw=raw)
 
         # Check VT escape sequences
@@ -316,6 +328,35 @@ class TerminalInput:
             return self._read_key_windows()
         else:
             return self._read_key_posix()
+
+    def read_key_timeout(self, timeout: float = 0.03) -> Optional[KeyEvent]:
+        """Reads a key with a timeout; returns None if no input arrives within timeout.
+        
+        Allows the TUI loop to process asynchronous background events and perform
+        single-owner redrawing without blocking indefinitely.
+        """
+        if self._iter is not None:
+            return self.read_key()
+
+        if sys.platform == "win32":
+            if not sys.stdin.isatty():
+                return self._read_key_windows()
+            import msvcrt
+            import time
+            start = time.time()
+            while time.time() - start < timeout:
+                if msvcrt.kbhit():
+                    return self._read_key_windows()
+                time.sleep(0.005)
+            return None
+        else:
+            if not sys.stdin.isatty():
+                return self._read_key_posix()
+            import select
+            r, _, _ = select.select([sys.stdin], [], [], timeout)
+            if r:
+                return self._read_key_posix()
+            return None
 
     def _read_key_windows(self) -> Optional[KeyEvent]:
         # If stdin is redirected / not a tty (e.g. subprocess pipe or CI), read from sys.stdin

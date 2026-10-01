@@ -2,6 +2,47 @@
 from typing import List, Optional
 from .activity import ActivityModel, ActivityState, ActivityType
 
+
+def _wrap_text(text: str, width: int, indent: str = "  ") -> List[str]:
+    """Wrap a single logical line into multiple display rows respecting terminal width.
+
+    Uses word-boundary wrapping.  Falls back to character wrapping for words
+    exceeding width.  Never hard-truncates semantic content.
+    """
+    if width <= 0:
+        width = 80
+    avail = max(10, width - len(indent))
+    result: List[str] = []
+
+    for line in text.splitlines():
+        if not line.strip():
+            result.append("")
+            continue
+        words = line.split(" ")
+        cur = indent
+        for w in words:
+            if not w:
+                continue
+            test = f"{cur} {w}" if cur != indent else f"{cur}{w}"
+            if len(test) <= width:
+                cur = test
+            else:
+                if cur.strip():
+                    result.append(cur)
+                # Handle single word longer than avail: character-wrap
+                if len(indent + w) > width:
+                    while w:
+                        chunk = w[:avail]
+                        w = w[avail:]
+                        result.append(f"{indent}{chunk}")
+                    cur = indent
+                else:
+                    cur = f"{indent}{w}"
+        if cur.strip():
+            result.append(cur)
+    return result if result else [""]
+
+
 class ActivityRenderer:
     """Renders activities with consistent markers and rhythm matching the locked design."""
 
@@ -15,7 +56,14 @@ class ActivityRenderer:
             lines = [f"> {detail_lines[0]}"]
             for l in detail_lines[1:]:
                 lines.append(f"  {l}")
-            return lines
+            # Wrap long user lines
+            wrapped: List[str] = []
+            for ln in lines:
+                if len(ln) > width and width > 10:
+                    wrapped.extend(_wrap_text(ln, width, indent="  "))
+                else:
+                    wrapped.append(ln)
+            return wrapped
 
         # Standard agent activity
         marker = "> ◌"
@@ -53,7 +101,14 @@ class ActivityRenderer:
                 prefix = "+" if d_line.type == "add" else ("-" if d_line.type == "remove" else " ")
                 lines.append(f"  {prefix} {d_line.content}")
 
-        return lines
+        # Wrap any line that exceeds terminal width
+        wrapped: List[str] = []
+        for ln in lines:
+            if len(ln) > width and width > 10:
+                wrapped.extend(_wrap_text(ln, width, indent="  "))
+            else:
+                wrapped.append(ln)
+        return wrapped
 
     @staticmethod
     def _render_claire_message(activity: ActivityModel, width: int = 68, use_color: bool = False) -> List[str]:
@@ -70,6 +125,11 @@ class ActivityRenderer:
             ]
 
         for line in msg_lines:
-            lines.append(f"  {line}")
+            raw = f"  {line}"
+            if len(raw) > width and width > 10:
+                lines.extend(_wrap_text(line, width, indent="  "))
+            else:
+                lines.append(raw)
 
         return lines
+
