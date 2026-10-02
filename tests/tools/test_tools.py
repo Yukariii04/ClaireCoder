@@ -207,17 +207,25 @@ def test_malformed_input_does_not_reach_execution():
 # TOOL RESULTS (AC-005)
 # ---------------------------------------------------------------------------
 
-def test_tool_result_success_through_executor():
+def test_tool_result_success_through_executor(tmp_path):
     """AC-005: Tool results returned through normalized interface."""
-    registry = ToolRegistry()
-    registry.register(ReadFileTool())
-    engine = PermissionEngine(autonomy_level=AutonomyLevel.AUTONOMOUS)
-    executor = ToolExecutor(registry, engine)
+    # Create a real file so ReadFile can succeed (§8: missing file = FAILURE)
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("hello world")
+    from clairecoder.tools.core import set_workspace_root
+    set_workspace_root(tmp_path)
+    try:
+        registry = ToolRegistry()
+        registry.register(ReadFileTool())
+        engine = PermissionEngine(autonomy_level=AutonomyLevel.AUTONOMOUS)
+        executor = ToolExecutor(registry, engine)
 
-    result = executor.invoke("filesystem.read", path="test.txt")
-    assert result.state == ToolState.SUCCESS
-    assert result.output is not None
-    assert result.error is None
+        result = executor.invoke("filesystem.read", path="test.txt")
+        assert result.state == ToolState.SUCCESS
+        assert result.output is not None
+        assert result.error is None
+    finally:
+        set_workspace_root(None)
 
 def test_tool_result_states_distinguishable():
     """AC-005: Can distinguish SUCCESS, FAILURE, DENIED, CANCELLED, TIMEOUT, UNAVAILABLE."""
@@ -230,15 +238,22 @@ def test_tool_result_states_distinguishable():
 # PERMISSION BOUNDARY INTEGRATION (AC-004)
 # ---------------------------------------------------------------------------
 
-def test_allow_execution():
+def test_allow_execution(tmp_path):
     """ALLOW → Tool executes and returns result."""
-    registry = ToolRegistry()
-    registry.register(ReadFileTool())
-    engine = PermissionEngine(autonomy_level=AutonomyLevel.AUTONOMOUS)
-    executor = ToolExecutor(registry, engine)
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("hello")
+    from clairecoder.tools.core import set_workspace_root
+    set_workspace_root(tmp_path)
+    try:
+        registry = ToolRegistry()
+        registry.register(ReadFileTool())
+        engine = PermissionEngine(autonomy_level=AutonomyLevel.AUTONOMOUS)
+        executor = ToolExecutor(registry, engine)
 
-    result = executor.invoke("filesystem.read", path="test.txt")
-    assert result.state == ToolState.SUCCESS
+        result = executor.invoke("filesystem.read", path="test.txt")
+        assert result.state == ToolState.SUCCESS
+    finally:
+        set_workspace_root(None)
 
 def test_deny_prevents_execution():
     """DENY → Tool does not execute."""
@@ -327,21 +342,28 @@ def test_denied_tool_cannot_execute_through_api():
     with pytest.raises(AttributeError):
         tool.execute(path="/important")
 
-def test_executor_is_only_valid_execution_path():
+def test_executor_is_only_valid_execution_path(tmp_path):
     """Verify ToolExecutor → PermissionEngine → Tool is the valid path."""
-    registry = ToolRegistry()
-    registry.register(ReadFileTool())
-    engine = PermissionEngine(autonomy_level=AutonomyLevel.AUTONOMOUS)
-    executor = ToolExecutor(registry, engine)
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("content")
+    from clairecoder.tools.core import set_workspace_root
+    set_workspace_root(tmp_path)
+    try:
+        registry = ToolRegistry()
+        registry.register(ReadFileTool())
+        engine = PermissionEngine(autonomy_level=AutonomyLevel.AUTONOMOUS)
+        executor = ToolExecutor(registry, engine)
 
-    # Valid path: executor → permission → tool
-    result = executor.invoke("filesystem.read", path="test.txt")
-    assert result.state == ToolState.SUCCESS
+        # Valid path: executor → permission → tool
+        result = executor.invoke("filesystem.read", path="test.txt")
+        assert result.state == ToolState.SUCCESS
 
-    # Invalid path: direct tool call → AttributeError
-    tool = registry.get("filesystem.read")
-    with pytest.raises(AttributeError):
-        tool.execute(path="test.txt")
+        # Invalid path: direct tool call → AttributeError
+        tool = registry.get("filesystem.read")
+        with pytest.raises(AttributeError):
+            tool.execute(path="test.txt")
+    finally:
+        set_workspace_root(None)
 
 def test_tool_cannot_bypass_permission_engine():
     """Tool execution through executor MUST go through permission check."""
@@ -506,16 +528,23 @@ def test_model_independence():
 # DETERMINISTIC BEHAVIOR
 # ---------------------------------------------------------------------------
 
-def test_deterministic_permission_evaluation():
+def test_deterministic_permission_evaluation(tmp_path):
     """Same request, same state → same result."""
-    registry = ToolRegistry()
-    registry.register(ReadFileTool())
-    engine = PermissionEngine(autonomy_level=AutonomyLevel.AUTONOMOUS)
-    executor = ToolExecutor(registry, engine)
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("content")
+    from clairecoder.tools.core import set_workspace_root
+    set_workspace_root(tmp_path)
+    try:
+        registry = ToolRegistry()
+        registry.register(ReadFileTool())
+        engine = PermissionEngine(autonomy_level=AutonomyLevel.AUTONOMOUS)
+        executor = ToolExecutor(registry, engine)
 
-    r1 = executor.invoke("filesystem.read", path="test.txt")
-    r2 = executor.invoke("filesystem.read", path="test.txt")
-    assert r1.state == r2.state == ToolState.SUCCESS
+        r1 = executor.invoke("filesystem.read", path="test.txt")
+        r2 = executor.invoke("filesystem.read", path="test.txt")
+        assert r1.state == r2.state == ToolState.SUCCESS
+    finally:
+        set_workspace_root(None)
 
 def test_session_scoped_permission():
     """Permission rule scoped to a session works through executor."""
