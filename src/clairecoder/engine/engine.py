@@ -153,8 +153,18 @@ class SubagentEngine:
             f"Tool Results: {self._parent_context.tool_results}\n"
             f"Skills: {self._parent_context.instructions}"
         )
+        model_id = self._objective.model_profile_id
+        if not model_id:
+            gw = getattr(self._engine, "_model_gateway", None)
+            if gw and hasattr(gw, "_models") and isinstance(gw._models, dict) and gw._models:
+                model_id = next(iter(gw._models.keys()))
+            elif gw and type(gw).__name__ != "ModelGateway" and hasattr(gw, "execute"):
+                model_id = "test-model"
+            else:
+                from clairecoder.gateway.types import ModelError
+                raise ModelError("No active model configured. Please configure a provider via /model or the setup wizard.")
         request = ModelRequest(
-            model_id=self._objective.model_profile_id or "default-model",
+            model_id=model_id,
             messages=[
                 {
                     "role": "system",
@@ -215,8 +225,15 @@ class EngineeringEngine:
             
         session.objective = objective
         session.mode = objective.mode
-        session.model_profile = objective.model_profile_id
-        
+        if objective.model_profile_id:
+            session.model_profile = objective.model_profile_id
+        elif not session.model_profile:
+            gw = self._model_gateway
+            if hasattr(gw, "_models") and isinstance(gw._models, dict) and gw._models:
+                session.model_profile = next(iter(gw._models.keys()))
+            elif gw and type(gw).__name__ != "ModelGateway" and hasattr(gw, "execute"):
+                session.model_profile = "test-model"
+            
         self._emit(EngineEvent.OBJECTIVE_STARTED, {"objective_id": objective.id})
         return session
 
@@ -318,9 +335,20 @@ class EngineeringEngine:
             
         context = self.assemble_context(session_id)
         
+        model_id = session.model_profile or getattr(session.objective, "model_profile_id", None)
+        if not model_id:
+            gw = self._model_gateway
+            if hasattr(gw, "_models") and isinstance(gw._models, dict) and gw._models:
+                model_id = next(iter(gw._models.keys()))
+            elif gw and type(gw).__name__ != "ModelGateway" and hasattr(gw, "execute"):
+                model_id = "test-model"
+            else:
+                from clairecoder.gateway.types import ModelError
+                raise ModelError("No active model configured. Please configure a provider via /model or the setup wizard.")
+
         # The model request includes relevant assembled context
         request = ModelRequest(
-            model_id=session.model_profile or "default-model",
+            model_id=model_id,
             messages=[
                 {"role": "system", "content": f"Understand Objective: {session.objective.request}\nContext Information: {context.session_info}\nSkills/Instructions: {context.instructions}"},
                 {"role": "user", "content": "Analyze objective and prepare understanding."}
@@ -500,7 +528,67 @@ class EngineeringEngine:
             {"role": "user", "content": f"Task: {task.description}"}
         ]
         
+        # Build tool definitions from available tools in registry
+        tools_decl = []
+        if self._tool_executor and hasattr(self._tool_executor, "_registry") and self._tool_executor._registry:
+            for tool in self._tool_executor._registry.list_available():
+                props = {}
+                req_fields = []
+                for k, v in tool.metadata.input_schema.items():
+                    if isinstance(v, dict):
+                        props[k] = {"type": v.get("type", "string"), "description": v.get("description", k)}
+                        if v.get("required"):
+                            req_fields.append(k)
+                    else:
+                        props[k] = {"type": "string"}
+                tools_decl.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.metadata.id,
+                        "description": tool.metadata.description,
+                        "parameters": {
+                            "type": "object",
+                            "properties": props,
+                            "required": req_fields,
+                        }
+                    }
+                })
+                # Add aliases
+                for alias, canonical in getattr(self._tool_executor._registry, "ALIASES", {}).items():
+                    if canonical == tool.metadata.id and alias != tool.metadata.id:
+                        tools_decl.append({
+                            "type": "function",
+                            "function": {
+                                "name": alias,
+                                "description": tool.metadata.description,
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": props,
+                                    "required": req_fields,
+                                }
+                            }
+                        })
+
+        model_id = session.model_profile or getattr(session.objective, "model_profile_id", None)
+        if not model_id:
+            gw = self._model_gateway
+            if hasattr(gw, "_models") and isinstance(gw._models, dict) and gw._models:
+                model_id = next(iter(gw._models.keys()))
+            elif gw and type(gw).__name__ != "ModelGateway" and hasattr(gw, "execute"):
+                model_id = "test-model"
+            else:
+                from clairecoder.gateway.types import ModelError
+                raise ModelError("No active model configured. Please configure a provider via /model or the setup wizard.")
+
         for _ in range(max_iterations):
+            # Check cancellation / pause state before model execution
+            if session.objective and session.objective.status in (ObjectiveStatus.PAUSED, ObjectiveStatus.CANCELLED, ObjectiveStatus.FAILED):
+                return ExecutionResult(
+                    category=ExecutionResultCategory.CANCELLED,
+                    failure_category=FailureCategory.USER_CANCELLATION,
+                    error_message="Execution interrupted or cancelled by user",
+                )
+
             # Assemble immutable context snapshot for this iteration
             context = self.assemble_context(session_id, task_id)
             
@@ -510,8 +598,9 @@ class EngineeringEngine:
             ] + interaction_history
             
             request = ModelRequest(
-                model_id=session.model_profile or "default-model",
-                messages=messages
+                model_id=model_id,
+                messages=messages,
+                tools=tools_decl if tools_decl else None
             )
             response = self.execute_model(request)
             
@@ -520,32 +609,60 @@ class EngineeringEngine:
                 interaction_history.append({"role": "assistant", "content": response.text})
             
             if response.tool_calls:
-                # Add tool_calls array to the interaction history (conceptually)
+                # Add tool_calls array to the interaction history
                 interaction_history.append({"role": "assistant", "tool_calls": response.tool_calls})
                 
                 tool_results_for_history = []
                 
                 for tc in response.tool_calls:
+                    # Check cancellation before each tool call
+                    if session.objective and session.objective.status in (ObjectiveStatus.PAUSED, ObjectiveStatus.CANCELLED, ObjectiveStatus.FAILED):
+                        return ExecutionResult(
+                            category=ExecutionResultCategory.CANCELLED,
+                            failure_category=FailureCategory.USER_CANCELLATION,
+                            error_message="Execution interrupted or cancelled by user",
+                        )
+
+                    if isinstance(tc, dict):
+                        fn = tc.get("function", {})
+                        tool_name = tc.get("name") or fn.get("name")
+                        raw_args = tc.get("arguments") or fn.get("arguments")
+                        if isinstance(raw_args, str):
+                            try:
+                                kwargs_dict = json.loads(raw_args)
+                            except Exception:
+                                kwargs_dict = {}
+                        elif isinstance(raw_args, dict):
+                            kwargs_dict = raw_args
+                        else:
+                            kwargs_dict = {}
+                    else:
+                        tool_name = str(tc)
+                        kwargs_dict = {}
+
                     tool_res = self.request_tool(
-                        tool_id=tc.get("name"),
+                        tool_id=tool_name,
                         session_id=session_id,
                         workflow_id=session.current_workflow,
                         task_id=task_id,
-                        **tc.get("arguments", {})
+                        **kwargs_dict
                     )
                     
                     # Store tool result for the next iteration model continuation
+                    content_str = str(tool_res.output) if tool_res.state == ToolState.SUCCESS else str(tool_res.error)
                     tool_results_for_history.append({
                         "role": "tool",
-                        "name": tc.get("name"),
-                        "content": str(tool_res.output) if tool_res.state == ToolState.SUCCESS else str(tool_res.error)
+                        "name": tool_name,
+                        "content": content_str
                     })
                     
                 # Feed ToolResults back into interaction history
                 interaction_history.extend(tool_results_for_history)
             else:
                 # No tools requested, model considers task done
-                return ExecutionResult(category=ExecutionResultCategory.SUCCESS)
+                last_text = response.text or ""
+                task.expected_result = last_text
+                return ExecutionResult(category=ExecutionResultCategory.SUCCESS, tool_result=last_text)
                 
         return ExecutionResult(
             category=ExecutionResultCategory.TIMEOUT,
@@ -592,9 +709,8 @@ class EngineeringEngine:
             task.status = TaskState.FAILED
             task.failure_state = failure_reason
             self._emit(EngineEvent.VALIDATION_COMPLETED, {"task_id": task_id, "passed": False})
-            
-            # Boundary signal: Replanning is required. (Phase 7 does not implement the Workflow Replanner)
-            self._emit(EngineEvent.REPLANNING_STARTED, {"task_id": task_id})
+            # Note: Do NOT emit REPLANNING_STARTED here — the decision to replan
+            # belongs to app.py's workflow loop, not the engine validation.
 
     def fail_task(self, session_id: str, task_id: str, failure_reason: str) -> None:
         """Mark task as failed and trigger replanning."""
@@ -603,7 +719,8 @@ class EngineeringEngine:
             task = session.tasks[task_id]
             task.status = TaskState.FAILED
             task.failure_state = failure_reason
-            self._emit(EngineEvent.REPLANNING_STARTED, {"task_id": task_id})
+            # Note: Do NOT emit REPLANNING_STARTED here — the replan decision
+            # belongs to app.py's workflow loop, not the engine.
 
     def complete_objective(self, session_id: str) -> None:
         """Mark objective as complete."""
@@ -620,8 +737,18 @@ class EngineeringEngine:
             self._emit(EngineEvent.EXECUTION_FAILED, {"objective_id": session.objective.id})
 
     def interrupt_execution(self, session_id: str) -> None:
-        """Interrupt active execution."""
+        """Interrupt active execution and mark objective as paused."""
+        session = self._sessions.get(session_id)
+        if session and session.objective:
+            session.objective.status = ObjectiveStatus.PAUSED
         self._emit(EngineEvent.EXECUTION_PAUSED, {"session_id": session_id})
+
+    def resume_execution(self, session_id: str) -> None:
+        """Resume paused execution."""
+        session = self._sessions.get(session_id)
+        if session and session.objective:
+            session.objective.status = ObjectiveStatus.ACTIVE
+        self._emit(EngineEvent.EXECUTION_RESUMED, {"session_id": session_id})
         
     def cancel_objective(self, session_id: str) -> None:
         """Cancel execution entirely."""

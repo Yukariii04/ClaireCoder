@@ -315,7 +315,10 @@ def test_validation_and_replanning(model_gateway, tool_executor, skill_registry)
     
     engine.validate_task("s1", "t1", passed=False, failure_reason="Test failed")
     assert EngineEvent.VALIDATION_COMPLETED in events
-    assert EngineEvent.REPLANNING_STARTED in events
+    # REPLANNING_STARTED is now emitted by app.py's workflow loop, not the engine.
+    # Engine validate_task correctly reports only the validation result.
+    session = engine.get_session("s1")
+    assert session.tasks["t1"].status == TaskState.FAILED
 
 def test_model_failure_propagation(model_gateway, tool_executor, skill_registry):
     engine = EngineeringEngine(model_gateway, tool_executor, skill_registry)

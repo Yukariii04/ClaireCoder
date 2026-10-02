@@ -359,3 +359,41 @@ def test_command_category_enum_covers_prd():
     # ADR §8 additions: agent, model, skill, tool
     for adr_cat in ["agent", "model", "skill", "tool"]:
         assert adr_cat in category_values
+
+
+def test_intent_classification_and_conversational_routing():
+    """Verify conversational questions stay conversational while actionable code requests route to engineering."""
+    gateway = MockGateway()
+    executor = ToolExecutor(ToolRegistry(), PermissionEngine())
+    engine = EngineeringEngine(gateway, executor)
+    controller = InteractionController(engine)
+
+    # Conversational prompts
+    assert controller._classify_intent("explain how acoustic models are trained") == "conversational"
+    assert controller._classify_intent("what is Python?") == "conversational"
+    assert controller._classify_intent("can you explain recursion?") == "conversational"
+    assert controller._classify_intent("hello there") == "conversational"
+
+    # Engineering prompts
+    assert controller._classify_intent("write me a code for adding two numbers in python") == "engineering"
+    assert controller._classify_intent("fix the bug in src/auth.py") == "engineering"
+    assert controller._classify_intent("run the tests") == "engineering"
+    assert controller._classify_intent("refactor database connection") == "engineering"
+
+
+def test_filter_tool_call_json():
+    """Raw internal tool-call JSON must be filtered out so it never leaks to transcript."""
+    gateway = MockGateway()
+    executor = ToolExecutor(ToolRegistry(), PermissionEngine())
+    engine = EngineeringEngine(gateway, executor)
+    controller = InteractionController(engine)
+
+    raw_tool_json = '{"name": "read_file", "arguments": {"path": "main.py"}}'
+    assert controller._filter_tool_call_json(raw_tool_json) == ""
+
+    mixed_text = 'Here is the plan: {"name": "edit_file", "arguments": {"path": "x.py"}} Done!'
+    filtered = controller._filter_tool_call_json(mixed_text)
+    assert '{"name":' not in filtered
+    assert "Here is the plan:" in filtered
+    assert "Done!" in filtered
+
