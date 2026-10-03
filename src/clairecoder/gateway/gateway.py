@@ -45,6 +45,14 @@ class ModelGateway(ModelGatewayInterface):
     def register_model(self, model: Model) -> None:
         self._models[model.id] = model
 
+    def get_registered_model_ids(self) -> List[str]:
+        """Return list of registered model IDs."""
+        return list(self._models.keys())
+
+    def list_models(self) -> List[Model]:
+        """Return list of registered Model objects."""
+        return list(self._models.values())
+
     def register_profile(self, profile: ModelProfile) -> None:
         self._profiles[profile.id] = profile
 

@@ -20,7 +20,7 @@ class WorkflowState(str, Enum):
     """Lifecycle states for a Workflow.
 
     CC-PRD-004 Section 7:
-        CREATED → PLANNED → ACTIVE → VALIDATING → COMPLETE / FAILED → REPLANNING → ACTIVE
+        CREATED → PLANNED → ACTIVE → VALIDATING → COMPLETE / FAILED → REPLANNING → ACTIVE / FAILED
     """
     CREATED = "created"
     PLANNED = "planned"

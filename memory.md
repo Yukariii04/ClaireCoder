@@ -47,11 +47,11 @@ RFD (9 docs) → RES (8 docs) → ADR (6 docs) → PRD (10 docs) → IMPLEMENTAT
 
 ## 2. Authoritative Repository State
 
-- **Active Milestone**: CLI / TUI Stage 7 Correction #22 (Provider Reliability) Completed and Verified.
-- **Baseline Test Suite Status**: **1038 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
-- **Milestone Scope**: All 22 Corrections of Stage 7 implemented, verified, and integrated without regressions.
-- **Repository Health**: Clean working tree, zero compiler/lint warnings, zero open technical debt.
-- **Next Authorized Action**: Absolute STOP. Await user review and explicit authorization before proceeding to Correction #23 or next milestone.
+- **Active Milestone**: CLI / TUI Stage 7 Correction #24.1 (Coding Workflow & TUI Recovery); implementation complete, tests not run.
+- **Most Recent Verified Test Baseline**: **1053 passed, 0 failures, 0 errors, 0 warnings** before Corrections #24 and #24.1; this is not verification of the current working tree.
+- **Milestone Scope**: Preserve existing uncommitted changes while repairing the permission-aware tool path, simple-request planning, Windows shell execution, runtime activity presentation, and stale task leakage.
+- **Repository Health**: Working tree contains user and agent changes; no commits created.
+- **Next Action**: Review the current correction and run validation when authorized; preserve the existing working tree.
 
 ---
 
@@ -257,6 +257,25 @@ clairecoder/
   - Emits provider lifecycle events: `PROVIDER_REQUEST_STARTED`, `PROVIDER_REQUEST_RETRYING`, `PROVIDER_REQUEST_COMPLETED`, `PROVIDER_REQUEST_FAILED`.
   - Clearly distinguishes provider transport/connection failures from planner structured validation failures (`ProviderInvalidOutputError`).
 
+### Correction #23 — End-to-End Hardening & Integration Invariants
+- **Runtime Lifecycle & Error Observability**:
+  - Replaced silent `except Exception: pass` catches during context assembly (`understand()`), subsystem sync helpers (`_sync_task_start`, `_sync_task_success`, `_sync_task_failure`, `_sync_task_verification_failure`), model capability checks, and engine task planning with typed `AGENT_ERROR` event emissions.
+  - Hardened event emitter fallback to Python logging (`logger.debug`) preserving the invariant that event emitter failures must not crash the runtime.
+  - Eliminated duplicate `RUN_FAILED` emissions, establishing `AgentRuntime.run()` as the single lifecycle authority pairing `RUN_STARTED` with `RUN_FAILED` or `RUN_COMPLETED`.
+  - Suppressed empty changeset event emissions when `changeset.files` is empty, avoiding spurious TUI stream noise.
+  - Added structured `AGENT_ERROR` emission upon uncaught task execution exceptions.
+- **Workflow Replanning Terminal State Invariant & Failure Evidence Preservation**:
+  - Fixed live CLI regression where failing or exhausted replanning attempted an invalid `REPLANNING → FAILED` transition (`WorkflowStateError: Cannot transition Workflow '...' from replanning to failed`).
+  - Added `WorkflowState.FAILED` to `_VALID_TRANSITIONS` for `WorkflowState.REPLANNING`, honoring the canonical `FAILED -> REPLANNING -> FAILED` recovery cycle.
+  - Hardened `AgentRuntime._replan()` with structured exception containment and typed `AGENT_ERROR` diagnostics, safely transitioning the workflow to `FAILED` upon replan generation failure.
+  - Bounded recovery event emission to ensure exactly one terminal `RECOVERY_FAILED` event is emitted.
+  - Guaranteed that original task execution / verification failure evidence is preserved in `RunResult.failure_reason` and terminal `RUN_FAILED` / `SESSION_FAILED` payloads.
+- **TaskGraph & Persistence Hardening**:
+  - Implemented `TaskGraph.sanitize_for_resume()` to safely reset in-flight tasks (`RUNNING`, `VERIFYING`, `EXECUTED`) to `READY` while preserving completed (`SUCCEEDED`) tasks upon session resume.
+  - Serialized `max_retries` into `Task.to_dict()` and `TaskGraph.from_dict()`, ensuring per-task retry policies survive session persistence checkpoints.
+  - Added `save_session = save` and `load_session = get` convenience aliases on `SessionStore`.
+  - Added public gateway inspection methods `get_registered_model_ids()` and `list_models()`.
+
 ---
 
 ## 5. Phase Verification Matrix
@@ -292,12 +311,15 @@ clairecoder/
 | **Stage 7 Correction #20** | TUI Activity System & Stream Presentation | Completed & Verified |
 | **Stage 7 Correction #21** | Session / Persistence State & Runtime Resume | Completed & Verified |
 | **Stage 7 Correction #22** | Provider Reliability & Normalized Error Protocol | Completed & Verified |
+| **Stage 7 Correction #23** | End-to-End Hardening & Integration Invariants (1053 tests passing) | Completed & Verified |
 
 ---
 
 ## 6. Artifact Ledger
 
-- `Phase_CLI_TUI_Stage_7_Correction_22.zip` (Current authoritative baseline)
+- `Phase_CLI_TUI_Stage_7_Correction_23_1.zip` (Previous authoritative baseline)
+- `Phase_CLI_TUI_Stage_7_Correction_23.zip`
+- `Phase_CLI_TUI_Stage_7_Correction_22.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_21.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_20.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_19.zip`

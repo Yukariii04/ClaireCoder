@@ -168,6 +168,16 @@ class TestWorkflowState:
         manager.transition_state("wf1", WorkflowState.PLANNED)
         assert manager.get_workflow("wf1").state == WorkflowState.PLANNED
 
+    def test_replanning_to_failed(self, manager):
+        """When replanning fails or is exhausted, workflow transitions to FAILED."""
+        manager.create_workflow("wf1", "obj1", "desc")
+        manager.transition_state("wf1", WorkflowState.PLANNED)
+        manager.transition_state("wf1", WorkflowState.ACTIVE)
+        manager.transition_state("wf1", WorkflowState.FAILED)
+        manager.transition_state("wf1", WorkflowState.REPLANNING)
+        manager.transition_state("wf1", WorkflowState.FAILED)
+        assert manager.get_workflow("wf1").state == WorkflowState.FAILED
+
     def test_paused_resume(self, manager):
         manager.create_workflow("wf1", "obj1", "desc")
         manager.transition_state("wf1", WorkflowState.PLANNED)

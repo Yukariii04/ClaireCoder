@@ -162,3 +162,7 @@ class SessionStore:
         if not self._dir.is_dir():
             return []
         return [f.stem for f in self._dir.glob("*.json") if not f.name.startswith(".")]
+
+    # Convenience aliases for descriptive callers
+    save_session = save
+    load_session = get

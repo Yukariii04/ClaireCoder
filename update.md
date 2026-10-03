@@ -1562,4 +1562,44 @@
   - Gateway suite: **83 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
   - Complete workspace test suite: **1038 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_22.zip`.
+- **Next Authorized Milestone**: Proceed to Correction #23.
+
+### 2026-10-03 — CLI / TUI Stage 7: Correction #23 (End-to-End Hardening & Integration Invariants)
+- **Status**: COMPLETED
+- **Goal**: Perform the final architecture-hardening pass across the complete ClaireCoder runtime without introducing major new subsystems, resolving integration weaknesses between Corrections #12–#22.
+- **Execution-Lifecycle Audit & Hardening**:
+  - **12 Weaknesses Identified and Resolved**:
+    1. *Verification Status & Exempt Representation*: Reconciled `DefaultVerifier` non-modifying task return (`status="unverified"`) with PRD Section 16 strict enum compliance across unit, recovery, and serialization tests.
+    2. *Understanding Failure Observability*: Replaced silent `except Exception: pass` during context assembly (`_engineering_engine.understand()`) with structured `AGENT_ERROR` event emissions.
+    3. *Subsystem Sync Helper Observability*: Eliminated silent exception swallowing in `_sync_task_start`, `_sync_task_success`, `_sync_task_failure`, and `_sync_task_verification_failure`, emitting typed `AGENT_ERROR` events while preserving runtime non-crashing contracts.
+    4. *Planning & Replanning Model Failure Observability*: Replaced silent catches around model capability checks and model executions in planning and replanning paths with structured `AGENT_ERROR` diagnostics.
+    5. *Engine Task Planning Sync*: Replaced silent catches in `_engineering_engine.plan_tasks()` with `AGENT_ERROR` diagnostics.
+    6. *Event Emission Fallback*: Hardened `_emit()` with Python logger fallback (`logger.debug`) so failed emissions are observable without breaking the invariant that event emitter failures must not crash the runtime.
+    7. *Duplicated Model Resolution & Gateway Introspection*: Added public inspection methods `get_registered_model_ids()` and `list_models()` to `ModelGateway`. Updated `app.py:get_active_model_id()` and `agent_runtime.py:_resolve_model()` to use the public API instead of accessing private `_models` dictionaries.
+    8. *Resume Task Sanitization*: Implemented `TaskGraph.sanitize_for_resume()` to automatically reset in-flight tasks (`RUNNING`, `VERIFYING`, `EXECUTED`) and re-evaluate `BLOCKED` tasks against current dependency states upon session resume, ensuring completed tasks (`SUCCEEDED`) are never blindly re-executed.
+    9. *TaskGraph Deserialization Validation Performance*: Documented design rationale for direct insertion in `TaskGraph.from_dict()`.
+    10. *Single Authority for Run Lifecycle Events*: Eliminated duplicate `RUN_FAILED` emission from inside `_initialize_task_graph`, maintaining `run()` as the single lifecycle authority that pairs `RUN_STARTED` with `RUN_FAILED` or `RUN_COMPLETED`.
+    11. *Task max_retries Serialization Round-Trip*: Added `max_retries` to `Task.to_dict()` and `TaskGraph.from_dict()` serialization, ensuring per-task retry policies survive session persistence checkpoints.
+    12. *Changeset Event Noise Suppression*: Guarded `_emit_changeset_events()` behind `if changeset.files:` so empty changesets without modifications do not produce spurious TUI activity noise.
+    13. *Uncaught Execution Exception Observability*: Emitted structured `AGENT_ERROR` whenever task execution catches an unhandled exception before recording failure evidence.
+    14. *Workflow Replanning Terminal State Invariant & Failure Evidence Preservation*: Resolved live CLI regression where exhausted or failing replanning attempted an invalid state transition `REPLANNING → FAILED` (`WorkflowStateError: Cannot transition Workflow '...' from replanning to failed`), crashing the runtime before terminal failure events could be emitted and replacing the original task failure evidence with the transition error. Added `WorkflowState.FAILED` to `_VALID_TRANSITIONS` for `WorkflowState.REPLANNING`, hardened `AgentRuntime._replan()` with structured exception containment and typed `AGENT_ERROR` emission, prevented duplicate `RECOVERY_FAILED` events, and guaranteed that the original task failure evidence is strictly preserved in `RunResult.failure_reason` and terminal `RUN_FAILED` / `SESSION_FAILED` payloads.
+  - **SessionStore Convenience Aliases**: Added `save_session = save` and `load_session = get` aliases to `SessionStore` for API consistency across test harnesses and runtime components.
+- **Files Created**:
+  - `tests/integration/test_correction_23_hardening.py`
+- **Files Modified**:
+  - `src/clairecoder/workflow/manager.py`
+  - `src/clairecoder/workflow/types.py`
+  - `src/clairecoder/runtime/agent_runtime.py`
+  - `src/clairecoder/gateway/gateway.py`
+  - `src/clairecoder/app.py`
+  - `src/clairecoder/workflow/task_graph.py`
+  - `src/clairecoder/session/store.py`
+  - `tests/workflow/test_workflow.py`
+  - `memory.md`
+  - `update.md`
+- **Tests**:
+  - 14 comprehensive end-to-end integration, runtime invariant, and regression tests in `tests/integration/test_correction_23_hardening.py`.
+  - Workflow test suite: **97 passed, 0 failures, 0 errors, 0 warnings**.
+  - Complete workspace test suite: **1053 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
+- **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_23_1.zip`.
 - **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning next phase.

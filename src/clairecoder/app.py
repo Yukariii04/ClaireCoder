@@ -150,6 +150,10 @@ class ClaireCoderV1:
         if active.get("model_id"):
             return active["model_id"]
         # Fallback to registered models in gateway
+        if hasattr(self.model_gateway, "get_registered_model_ids"):
+            mids = self.model_gateway.get_registered_model_ids()
+            if mids:
+                return mids[0]
         if hasattr(self.model_gateway, "_models") and isinstance(self.model_gateway._models, dict) and self.model_gateway._models:
             return next(iter(self.model_gateway._models.keys()))
         if type(self.model_gateway).__name__ != "ModelGateway" and hasattr(self.model_gateway, "execute"):

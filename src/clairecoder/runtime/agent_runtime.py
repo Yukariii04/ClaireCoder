@@ -11,11 +11,14 @@ Correction #14: Extracted from app.py to establish a clean boundary:
     ROLES        — bounded role responsibilities (Correction #18)
 """
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 from clairecoder.workspace.workspace import Workspace
 from clairecoder.tools.registry import ToolRegistry
@@ -595,8 +598,13 @@ class AgentRuntime:
         if self._engineering_engine and session_id:
             try:
                 self._engineering_engine.understand(session_id)
-            except Exception:
-                pass
+            except Exception as e:
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    session_id=session_id,
+                    run_id=run_id,
+                    payload={"error": f"Context assembly (understand) failed: {e}", "phase": "understand"},
+                )
 
         # 2. Plan and initialize TaskGraph
         graph, plan = self._initialize_task_graph(
@@ -614,6 +622,7 @@ class AgentRuntime:
 
         if plan is None and task_graph is None and graph.has_failures():
             # Planning failed fatally before execution started
+            reason = graph.tasks[0].description if graph.tasks else "Planning failed"
             if session:
                 session.status = SessionStatus.FAILED
                 self._checkpoint_session(session, run_id=run_id, graph=graph)
@@ -622,18 +631,33 @@ class AgentRuntime:
                     session_id=session.session_id,
                     run_id=run_id,
                     objective_id=objective_id,
-                    payload={"session_id": session.session_id, "reason": "Planning failed", "status": "failed"},
+                    payload={"session_id": session.session_id, "reason": reason, "status": "failed"},
                 )
             if self._workflow_manager:
                 wf = self._workflow_manager.get_workflow(workflow_id)
                 if wf and wf.state == WorkflowState.CREATED:
                     self._workflow_manager.transition_state(workflow_id, WorkflowState.CANCELLED)
+
+            self._emit(
+                EventType.RUN_FAILED,
+                session_id=session_id,
+                run_id=run_id,
+                objective_id=objective_id,
+                payload={
+                    "run_id": run_id,
+                    "objective_id": objective_id,
+                    "reason": reason,
+                    "failed_tasks": [t.id for t in graph.tasks if t.status == TaskState.FAILED],
+                    "blocked_tasks": [t.id for t in graph.tasks if t.status == TaskState.BLOCKED],
+                },
+            )
+
             return self._build_result(
                 success=False,
                 run_id=run_id,
                 objective_id=objective_id,
                 graph=graph,
-                failure_reason=graph.tasks[0].description if graph.tasks else "Planning failed",
+                failure_reason=reason,
             )
 
         # 3. Main Agent Execution Loop
@@ -740,20 +764,21 @@ class AgentRuntime:
                                         "reason": "Replanning failed to generate a new graph",
                                     },
                                 )
-
-                        # No replans remain — terminal failure
-                        if replan_count > 0 or has_recovered_attempts:
-                            self._emit(
-                                EventType.RECOVERY_FAILED,
-                                session_id=session_id,
-                                run_id=run_id,
-                                objective_id=objective_id,
-                                payload={
-                                    "recovery_type": "replan" if replan_count > 0 else "retry",
-                                    "reason": "Recovery exhausted: all retries and replans completed without success",
-                                },
-                            )
-                        break
+                                break
+                        else:
+                            # Replan budget exhausted or not permitted — terminal failure
+                            if replan_count > 0 or has_recovered_attempts:
+                                self._emit(
+                                    EventType.RECOVERY_FAILED,
+                                    session_id=session_id,
+                                    run_id=run_id,
+                                    objective_id=objective_id,
+                                    payload={
+                                        "recovery_type": "replan" if replan_count > 0 else "retry",
+                                        "reason": "Recovery exhausted: all retries and replans completed without success",
+                                    },
+                                )
+                            break
                     else:
                         # No ready tasks and no failures (e.g. empty or unresolvable)
                         break
@@ -785,6 +810,13 @@ class AgentRuntime:
                     try:
                         exec_result = self._execute_task(task, session_id=session_id, attempt_number=attempt_num)
                     except Exception as e:
+                        self._emit(
+                            EventType.AGENT_ERROR,
+                            session_id=session_id,
+                            run_id=run_id,
+                            task_id=task_id,
+                            payload={"error": f"Task execution failed with uncaught exception: {e}", "phase": "execution"},
+                        )
                         exec_result = ExecutionResult(
                             category=ExecutionResultCategory.FAILURE,
                             failure_category=FailureCategory.UNKNOWN_FAILURE,
@@ -815,13 +847,14 @@ class AgentRuntime:
                         else:
                             exec_result.changed_files = new_paths
 
-                    # Emit runtime events for changeset
-                    self._emit_changeset_events(
-                        changeset=changeset,
-                        run_id=run_id,
-                        objective_id=objective_id,
-                        task_id=task_id,
-                    )
+                    # Emit runtime events for changeset (only if files actually changed)
+                    if changeset.files:
+                        self._emit_changeset_events(
+                            changeset=changeset,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            task_id=task_id,
+                        )
 
                     # --- Strict Gating: Check Execution Success ---
                     if not exec_result.success:
@@ -1337,16 +1370,10 @@ class AgentRuntime:
                 run_id=session.current_run_id,
             )
 
-            # Sanitize in-flight / interrupted tasks:
-            # Completed & verified tasks (SUCCEEDED) must NOT be blindly re-executed!
-            # Tasks that were in RUNNING, VERIFYING, or EXECUTED when interrupted
-            # are reset to READY so they can resume execution cleanly.
-            for task in graph.tasks:
-                if task.status in (TaskState.RUNNING, TaskState.VERIFYING, TaskState.EXECUTED):
-                    task.status = TaskState.READY
-
-            # Re-finalize graph to validate dependencies and ensure readiness is set
-            graph.finalize()
+            # Sanitize in-flight / interrupted and blocked tasks:
+            # Completed & verified tasks (SUCCEEDED) are preserved.
+            # In-flight and blocked tasks are re-evaluated against dependencies.
+            graph.sanitize_for_resume()
 
         # Mark session active again
         session.status = SessionStatus.ACTIVE
@@ -1410,8 +1437,13 @@ class AgentRuntime:
                         self._model_gateway.check_capability(active_model, Capability.STRUCTURED_OUTPUT)
                         or self._model_gateway.check_capability(active_model, Capability.JSON_SCHEMA)
                     )
-                except Exception:
+                except Exception as e:
                     use_structured = True
+                    self._emit(
+                        EventType.AGENT_ERROR,
+                        run_id=run_id,
+                        payload={"error": f"Capability check failed, defaulting to structured: {e}", "phase": "planning"},
+                    )
 
             req = self._planner.build_planning_request(
                 objective=objective_req,
@@ -1422,8 +1454,14 @@ class AgentRuntime:
             )
             try:
                 model_resp = self._engineering_engine.execute_model(req)
-            except Exception:
+            except Exception as e:
                 model_resp = None
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    run_id=run_id,
+                    objective_id=objective_id,
+                    payload={"error": f"Planning model execution failed: {e}", "phase": "planning"},
+                )
 
         try:
             plan = self._planner.create_plan(
@@ -1433,16 +1471,16 @@ class AgentRuntime:
                 model_response=model_resp,
             )
         except PlanningError as pe:
+            # Emit AGENT_ERROR for planning failure diagnostics.
+            # Do NOT emit RUN_FAILED here — the caller (run()) is the single
+            # authority for run lifecycle events (Fix #10: duplicate RUN_FAILED prevention).
             self._emit(
-                EventType.RUN_FAILED,
+                EventType.AGENT_ERROR,
                 run_id=run_id,
                 objective_id=objective_id,
                 payload={
-                    "run_id": run_id,
-                    "objective_id": objective_id,
-                    "reason": f"Planning failed: {pe}",
-                    "failed_tasks": [],
-                    "blocked_tasks": [],
+                    "error": f"Planning failed: {pe}",
+                    "phase": "planning",
                 },
             )
             graph = TaskGraph(event_emitter=self._event_emitter, run_id=run_id)
@@ -1470,7 +1508,6 @@ class AgentRuntime:
         tasks = self._planner.create_tasks_from_plan(plan, objective_id)
         if not tasks:
             # Fallback default task if plan produced no tasks
-            val_reqs = [objective_req] if ("verify" in objective_req.lower() or "create" in objective_req.lower()) else []
             task_id = f"T1_{objective_id.replace('-', '')[:8]}"
             tasks = [
                 Task(
@@ -1479,7 +1516,6 @@ class AgentRuntime:
                     title=objective_req,
                     description=objective_req,
                     type=TaskType.IMPLEMENTATION,
-                    validation_requirements=val_reqs,
                 )
             ]
             plan.task_ids = [task_id]
@@ -1496,8 +1532,13 @@ class AgentRuntime:
         if self._engineering_engine and session_id:
             try:
                 self._engineering_engine.plan_tasks(session_id, tasks)
-            except Exception:
-                pass
+            except Exception as e:
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    run_id=run_id,
+                    objective_id=objective_id,
+                    payload={"error": f"Engine plan_tasks sync failed: {e}", "phase": "planning"},
+                )
 
         if self._workflow_manager:
             self._workflow_manager.add_plan(plan)
@@ -1736,8 +1777,13 @@ class AgentRuntime:
                         self._model_gateway.check_capability(active_model, Capability.STRUCTURED_OUTPUT)
                         or self._model_gateway.check_capability(active_model, Capability.JSON_SCHEMA)
                     )
-                except Exception:
+                except Exception as e:
                     use_structured = True
+                    self._emit(
+                        EventType.AGENT_ERROR,
+                        run_id=run_id,
+                        payload={"error": f"Capability check failed in replan, defaulting to structured: {e}", "phase": "replanning"},
+                    )
 
             try:
                 req = self._planner.build_replan_request(
@@ -1750,8 +1796,14 @@ class AgentRuntime:
                 )
                 if self._engineering_engine and active_model and req is not None:
                     model_resp = self._engineering_engine.execute_model(req)
-            except Exception:
+            except Exception as e:
                 model_resp = None
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    run_id=run_id,
+                    objective_id=objective_id,
+                    payload={"error": f"Replanning model execution failed: {e}", "phase": "replanning"},
+                )
 
         try:
             new_plan = self._planner.create_plan(
@@ -1761,41 +1813,67 @@ class AgentRuntime:
                 model_response=model_resp,
                 strict=True if model_resp is not None else False,
             )
-        except PlanningError:
+
+            new_tasks = self._planner.create_tasks_from_plan(new_plan, objective_id)
+            if not new_tasks:
+                task_id = f"T{replan_count}_r{replan_count}_{objective_id.replace('-', '')[:8]}"
+                new_tasks = [
+                    Task(
+                        id=task_id,
+                        objective_id=objective_id,
+                        title=f"Replan attempt {replan_count}: {objective_req}",
+                        description=objective_req,
+                        type=TaskType.IMPLEMENTATION,
+                    )
+                ]
+                new_plan.task_ids = [task_id]
+
+            new_graph = TaskGraph(event_emitter=self._event_emitter, run_id=run_id)
+            for t in new_tasks:
+                new_graph.add_task(t)
+            new_graph.finalize()
+
+            if self._engineering_engine and session_id:
+                try:
+                    self._engineering_engine.plan_tasks(session_id, new_tasks)
+                except Exception as e:
+                    self._emit(
+                        EventType.AGENT_ERROR,
+                        run_id=run_id,
+                        objective_id=objective_id,
+                        payload={"error": f"Engine replan sync failed: {e}", "phase": "replanning"},
+                    )
+
+            if self._workflow_manager:
+                self._workflow_manager.add_plan(new_plan)
+                self._workflow_manager.transition_state(workflow_id, WorkflowState.PLANNED)
+                self._workflow_manager.transition_state(workflow_id, WorkflowState.ACTIVE)
+
+            return new_graph, new_plan
+        except PlanningError as pe:
+            self._emit(
+                EventType.AGENT_ERROR,
+                run_id=run_id,
+                objective_id=objective_id,
+                payload={"error": f"Replanning plan generation failed: {pe}", "phase": "replanning"},
+            )
+            if self._workflow_manager:
+                wf = self._workflow_manager.get_workflow(workflow_id)
+                if wf and wf.state == WorkflowState.REPLANNING:
+                    self._workflow_manager.transition_state(workflow_id, WorkflowState.FAILED)
             return None, None
-
-
-        new_tasks = self._planner.create_tasks_from_plan(new_plan, objective_id)
-        if not new_tasks:
-            task_id = f"T{replan_count}_r{replan_count}_{objective_id.replace('-', '')[:8]}"
-            new_tasks = [
-                Task(
-                    id=task_id,
-                    objective_id=objective_id,
-                    title=f"Replan attempt {replan_count}: {objective_req}",
-                    description=objective_req,
-                    type=TaskType.IMPLEMENTATION,
-                )
-            ]
-            new_plan.task_ids = [task_id]
-
-        new_graph = TaskGraph(event_emitter=self._event_emitter, run_id=run_id)
-        for t in new_tasks:
-            new_graph.add_task(t)
-        new_graph.finalize()
-
-        if self._engineering_engine and session_id:
-            try:
-                self._engineering_engine.plan_tasks(session_id, new_tasks)
-            except Exception:
-                pass
-
-        if self._workflow_manager:
-            self._workflow_manager.add_plan(new_plan)
-            self._workflow_manager.transition_state(workflow_id, WorkflowState.PLANNED)
-            self._workflow_manager.transition_state(workflow_id, WorkflowState.ACTIVE)
-
-        return new_graph, new_plan
+        except Exception as e:
+            self._emit(
+                EventType.AGENT_ERROR,
+                run_id=run_id,
+                objective_id=objective_id,
+                payload={"error": f"Replanning failed unexpectedly: {e}", "phase": "replanning"},
+            )
+            if self._workflow_manager:
+                wf = self._workflow_manager.get_workflow(workflow_id)
+                if wf and wf.state == WorkflowState.REPLANNING:
+                    self._workflow_manager.transition_state(workflow_id, WorkflowState.FAILED)
+            return None, None
 
     # =========================================================================
     # SUBSYSTEM SYNCHRONIZATION HELPERS
@@ -1814,14 +1892,24 @@ class AgentRuntime:
             if exec_t.status in (ETaskState.READY, ETaskState.PAUSED):
                 try:
                     self._execution_manager.start_execution(task.id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self._emit(
+                        EventType.AGENT_ERROR,
+                        session_id=session_id,
+                        task_id=task.id,
+                        payload={"error": f"ExecutionManager start_execution sync failed: {e}", "phase": "sync"},
+                    )
 
         if self._engineering_engine and session_id:
             try:
                 self._engineering_engine.start_task(session_id, task.id)
-            except Exception:
-                pass
+            except Exception as e:
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    session_id=session_id,
+                    task_id=task.id,
+                    payload={"error": f"EngineeringEngine start_task sync failed: {e}", "phase": "sync"},
+                )
 
     def _sync_task_success(self, task_id: str, session_id: Optional[str], exec_id: str, exec_result: ExecutionResult) -> None:
         """Synchronize task success with ExecutionManager and EngineeringEngine."""
@@ -1830,14 +1918,24 @@ class AgentRuntime:
                 exec_t = self._execution_manager.get_task(task_id)
                 attempt_id = exec_t.attempts[-1].execution_id if (exec_t and exec_t.attempts) else exec_id
                 self._execution_manager.complete_execution(task_id, attempt_id, exec_result, is_verified=True)
-            except Exception:
-                pass
+            except Exception as e:
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    session_id=session_id,
+                    task_id=task_id,
+                    payload={"error": f"ExecutionManager complete_execution sync failed: {e}", "phase": "sync"},
+                )
 
         if self._engineering_engine and session_id:
             try:
                 self._engineering_engine.validate_task(session_id, task_id, passed=True)
-            except Exception:
-                pass
+            except Exception as e:
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    session_id=session_id,
+                    task_id=task_id,
+                    payload={"error": f"EngineeringEngine validate_task sync failed: {e}", "phase": "sync"},
+                )
 
     def _sync_task_failure(self, task_id: str, session_id: Optional[str], exec_id: str, exec_result: ExecutionResult) -> None:
         """Synchronize execution failure with ExecutionManager and EngineeringEngine."""
@@ -1846,14 +1944,24 @@ class AgentRuntime:
                 exec_t = self._execution_manager.get_task(task_id)
                 attempt_id = exec_t.attempts[-1].execution_id if (exec_t and exec_t.attempts) else exec_id
                 self._execution_manager.complete_execution(task_id, attempt_id, exec_result, is_verified=False)
-            except Exception:
-                pass
+            except Exception as e:
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    session_id=session_id,
+                    task_id=task_id,
+                    payload={"error": f"ExecutionManager complete_execution sync failed: {e}", "phase": "sync"},
+                )
 
         if self._engineering_engine and session_id:
             try:
                 self._engineering_engine.fail_task(session_id, task_id, failure_reason=exec_result.error_message)
-            except Exception:
-                pass
+            except Exception as e:
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    session_id=session_id,
+                    task_id=task_id,
+                    payload={"error": f"EngineeringEngine fail_task sync failed: {e}", "phase": "sync"},
+                )
 
     def _sync_task_verification_failure(self, task_id: str, session_id: Optional[str], exec_id: str, exec_result: ExecutionResult) -> None:
         """Synchronize verification failure with ExecutionManager and EngineeringEngine."""
@@ -1862,14 +1970,24 @@ class AgentRuntime:
                 exec_t = self._execution_manager.get_task(task_id)
                 attempt_id = exec_t.attempts[-1].execution_id if (exec_t and exec_t.attempts) else exec_id
                 self._execution_manager.complete_execution(task_id, attempt_id, exec_result, is_verified=False)
-            except Exception:
-                pass
+            except Exception as e:
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    session_id=session_id,
+                    task_id=task_id,
+                    payload={"error": f"ExecutionManager complete_execution sync failed: {e}", "phase": "sync"},
+                )
 
         if self._engineering_engine and session_id:
             try:
                 self._engineering_engine.validate_task(session_id, task_id, passed=False, failure_reason="Verification failed")
-            except Exception:
-                pass
+            except Exception as e:
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    session_id=session_id,
+                    task_id=task_id,
+                    payload={"error": f"EngineeringEngine validate_task sync failed: {e}", "phase": "sync"},
+                )
 
     def _is_cancelled(self, session_id: Optional[str], objective: Any) -> bool:
         """Check if execution has been cancelled."""
@@ -1897,6 +2015,10 @@ class AgentRuntime:
             if sess and sess.model_profile:
                 return sess.model_profile
         if self._model_gateway:
+            if hasattr(self._model_gateway, "get_registered_model_ids"):
+                mids = self._model_gateway.get_registered_model_ids()
+                if mids:
+                    return mids[0]
             if hasattr(self._model_gateway, "_models") and isinstance(self._model_gateway._models, dict) and self._model_gateway._models:
                 return next(iter(self._model_gateway._models.keys()))
             if type(self._model_gateway).__name__ != "ModelGateway" and hasattr(self._model_gateway, "execute"):
@@ -1927,8 +2049,10 @@ class AgentRuntime:
                     payload=payload or {},
                 )
                 self._event_emitter.emit(event)
-            except Exception:
-                pass
+            except Exception as e:
+                # Absolute last resort: event emission failure must not crash the runtime,
+                # but must not be invisible either. Log to Python logger.
+                logger.debug("Event emission failed for %s: %s", event_type, e)
 
     def _emit_changeset_events(
         self,

@@ -531,6 +531,19 @@ class TaskGraph:
         graph.finalize()
         return graph
 
+    def sanitize_for_resume(self) -> None:
+        """Reset in-flight and blocked tasks and re-evaluate readiness upon resume.
+
+        - Terminal tasks (SUCCEEDED, FAILED, CANCELLED) are preserved.
+        - In-flight tasks (RUNNING, VERIFYING, EXECUTED) and BLOCKED tasks
+          are reset to PENDING and re-evaluated against current dependency states.
+        """
+        for task in self._tasks.values():
+            if task.status in (TaskState.RUNNING, TaskState.VERIFYING, TaskState.EXECUTED, TaskState.BLOCKED):
+                task.status = TaskState.PENDING
+        self.finalize()
+        self._update_pending_states()
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the graph state."""
         tasks_data = []
@@ -548,6 +561,7 @@ class TaskGraph:
                 "expected_outputs": task.expected_outputs,
                 "validation": task.validation,
                 "attempts": task.attempts,
+                "max_retries": task.max_retries,
                 "failure_evidence": task.failure_evidence,
                 "metadata": task.metadata,
                 "validation_requirements": task.validation_requirements,
@@ -565,7 +579,13 @@ class TaskGraph:
         event_emitter: Optional[Any] = None,
         run_id: Optional[str] = None,
     ) -> "TaskGraph":
-        """Restore a TaskGraph from serialized data."""
+        """Restore a TaskGraph from serialized data.
+        
+        Design decision: Tasks are inserted directly into `_tasks` and `_insertion_order`
+        rather than calling `add_task()` because serialized data was already validated
+        at creation time. This avoids redundant O(N) duplicate and dependency checks
+        during session resume.
+        """
         graph = cls(
             event_callback=event_callback,
             event_emitter=event_emitter,
@@ -597,6 +617,7 @@ class TaskGraph:
                 validation=td.get("validation", []),
                 validation_requirements=td.get("validation_requirements", []),
                 attempts=td.get("attempts", 0),
+                max_retries=td.get("max_retries", None),
                 failure_evidence=td.get("failure_evidence", []),
                 metadata=td.get("metadata", {}),
             )

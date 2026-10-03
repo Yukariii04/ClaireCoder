@@ -33,7 +33,7 @@ _VALID_TRANSITIONS: Dict[WorkflowState, set] = {
                                  WorkflowState.BLOCKED, WorkflowState.FAILED},
     WorkflowState.VALIDATING:   {WorkflowState.COMPLETE, WorkflowState.FAILED},
     WorkflowState.FAILED:       {WorkflowState.REPLANNING, WorkflowState.CANCELLED},
-    WorkflowState.REPLANNING:   {WorkflowState.PLANNED, WorkflowState.CANCELLED},
+    WorkflowState.REPLANNING:   {WorkflowState.PLANNED, WorkflowState.FAILED, WorkflowState.CANCELLED},
     WorkflowState.PAUSED:       {WorkflowState.ACTIVE, WorkflowState.CANCELLED},
     WorkflowState.INTERRUPTED:  {WorkflowState.ACTIVE, WorkflowState.CANCELLED},
     WorkflowState.BLOCKED:      {WorkflowState.ACTIVE, WorkflowState.CANCELLED},
