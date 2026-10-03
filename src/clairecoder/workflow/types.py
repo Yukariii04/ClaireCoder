@@ -84,6 +84,8 @@ class TaskState(str, Enum):
     PENDING = "pending"
     READY = "ready"
     RUNNING = "running"
+    EXECUTED = "executed"
+    VERIFYING = "verifying"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -93,7 +95,7 @@ class TaskState(str, Enum):
     def _missing_(cls, value: Any) -> "TaskState":
         if isinstance(value, str):
             v = value.lower().strip()
-            if v in ("completed", "done"):
+            if v in ("completed", "done", "verified"):
                 return cls.SUCCEEDED
             for member in cls:
                 if member.value == v:
@@ -101,8 +103,9 @@ class TaskState(str, Enum):
         return super()._missing_(value)
 
 
-# Alias TaskState.COMPLETED to SUCCEEDED
+# Alias TaskState.COMPLETED and TaskState.VERIFIED to SUCCEEDED
 TaskState.COMPLETED = TaskState.SUCCEEDED
+TaskState.VERIFIED = TaskState.SUCCEEDED
 
 # Alias TaskStatus to TaskState for naming compatibility
 TaskStatus = TaskState
@@ -195,8 +198,9 @@ class Task:
     required_skills: List[str] = field(default_factory=list)
     required_tools: List[str] = field(default_factory=list)
 
-    # --- Correction #13: Attempt & failure tracking ---
+    # --- Correction #13 & #17: Attempt, retry & failure tracking ---
     attempts: int = 0
+    max_retries: Optional[int] = None
     failure_evidence: List[Dict[str, Any]] = field(default_factory=list)
 
     # --- Arbitrary metadata ---

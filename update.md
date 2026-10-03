@@ -1224,3 +1224,72 @@
   - Full test suite: **857 passed, 0 skipped, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_16.zip`.
 - **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning Correction #17.
+
+## 2026-10-03 — CLI / TUI Stage 7: Correction #17 (Verification as a First-Class Boundary + Controlled Bounded Recovery)
+
+- **Status**: Completed and Verified.
+- **Implemented**:
+  - **Verification as a First-Class Runtime Boundary**:
+    - Decoupled execution success from task success in `AgentRuntime`: execution success guarantees command completion, but only structured verification determines task success (`Task -> Execute -> ExecutionResult -> Verify -> VerificationResult -> Task success/failure -> Recovery`).
+    - Fixed the false-success bug where an executor returning without exceptions falsely marked a task and run as successful.
+  - **Structured VerificationResult (`clairecoder.verification.types`)**:
+    - Created dataclass `VerificationResult` containing `task_id`, `success`, `status`, `checks`, `evidence`, `failures`, `duration`, `changeset_id`, and `metadata`.
+    - Added clean dictionary serialization/deserialization (`to_dict`, `from_dict`) and tuple unpacking compatibility `(result, success)` for downstream convenience.
+    - Preserved CC-PRD-009 §8 strict `VerificationStatus` enum without breaking existing 6-member invariants.
+  - **Clean Verifier Interface & DefaultVerifier (`clairecoder.verification.verifier`)**:
+    - Defined abstract `Verifier` interface with `verify(task, execution_result, changeset=None) -> VerificationResult`.
+    - Implemented `DefaultVerifier` consuming real evidence: execution failure gating, command exit code inspection (`exit_code != 0`), test failure inspection (`failures > 0`), ChangeSet file/path validation, criteria evaluation via `VerificationEngine`, and explicit `"unverified"` representation when no verification criteria are specified.
+  - **Extended Task Lifecycle & TaskGraph Transitions (`clairecoder.workflow.types`, `clairecoder.workflow.task_graph`)**:
+    - Extended `TaskState` with `EXECUTED` and `VERIFYING`.
+    - Added `TaskGraph.mark_executed(task_id)` and `TaskGraph.mark_verifying(task_id)`.
+    - Permitted transitions to `FAILED` and `SUCCEEDED` from `RUNNING`, `EXECUTED`, or `VERIFYING`.
+    - Added `max_retries: Optional[int] = None` to `Task` model.
+  - **Bounded Recovery (Retry & Replan) in `AgentRuntime`**:
+    - Implemented bounded retries controlled by `task.max_retries` and `max_task_retries`.
+    - On retryable failure, `AgentRuntime` calls `graph.mark_retrying(task_id)` and retries execution/verification up to the configured limit.
+    - On retry exhaustion or non-retryable failure, runtime transitions to replanning recovery if replanning is supported and allowed (`_can_replan()`), preventing infinite loops and preserving user-provided task graph topologies.
+    - Downstream tasks remain strictly `BLOCKED` when a dependency task genuinely fails.
+  - **Persistent Failure Evidence (`Task.failure_evidence`)**:
+    - Failure evidence survives through the runtime lifecycle and is attached to `Task` and `RunResult`.
+    - Preserves `task_id`, `kind` (`execution_failure`, `verification_failure`), `error`/`message`, `detail`/`evidence`, `affected_files`, `changeset_id`, and `attempt`.
+  - **ChangeSet Integration with Verification & Recovery**:
+    - Forwarded ChangeSet information (`changeset_id`, changed files, additions, deletions, affected paths) into `Verifier.verify()`.
+    - Failed tasks leave their ChangeSet recorded in `ChangeSetStore` and attached to failure evidence without premature rollback.
+  - **Structured Runtime Verification & Recovery Events (`clairecoder.runtime.events`)**:
+    - Added `VERIFICATION_STARTED`, `VERIFICATION_PASSED`, `VERIFICATION_COMPLETED`, `VERIFICATION_FAILED`, `RECOVERY_STARTED`, `RETRY_STARTED`, `REPLAN_STARTED`, `RECOVERY_COMPLETED`, and `RECOVERY_FAILED` to `EventType`.
+    - Emitted all events with correlation data (`run_id`, `task_id`, `changeset_id`, evidence, attempt count).
+  - **Precise RunResult Distinction (`clairecoder.runtime.agent_runtime`)**:
+    - Updated `RunResult` to distinctly report `execution_success`, `verification_success`, `recovered_success`, `final_failure`, and accumulated `verification_results`.
+    - A run never reports success if any task failed, remains blocked, or failed verification.
+- **Files Created**:
+  - `src/clairecoder/verification/verifier.py`
+  - `tests/verification/test_verification_recovery.py`
+- **Files Modified**:
+  - `src/clairecoder/workflow/types.py`
+  - `src/clairecoder/workflow/task_graph.py`
+  - `src/clairecoder/verification/types.py`
+  - `src/clairecoder/verification/__init__.py`
+  - `src/clairecoder/runtime/events.py`
+  - `src/clairecoder/runtime/agent_runtime.py`
+  - `memory.md`
+  - `update.md`
+- **Tests**:
+  - 15 new focused unit and integration tests in `tests/verification/test_verification_recovery.py`:
+    1. `test_successful_execution_and_successful_verification`: Successful execution and verification lifecycle with events.
+    2. `test_successful_execution_and_failed_verification`: Execution succeeds but verification fails; task marked FAILED.
+    3. `test_execution_failure_prevents_verification_pass`: Execution failure cleanly transitions to FAILED and records evidence.
+    4. `test_verification_failure_evidence_structure`: Structured failure evidence persists with kind, detail, attempt, affected files.
+    5. `test_bounded_retry_exhaustion`: Retries are strictly bounded by `max_retries` before terminal failure.
+    6. `test_successful_retry_recovery`: Failed task retries and succeeds, marking run as recovered_success.
+    7. `test_replan_after_recovery_exhaustion`: Exhausted task retries trigger replanning recovery.
+    8. `test_downstream_task_remains_blocked_on_dependency_failure`: Downstream dependent tasks remain BLOCKED.
+    9. `test_changeset_information_reaches_verification`: ChangeSet details reach Verifier and failure evidence.
+    10. `test_runtime_verification_and_recovery_events`: Full sequence of verification and recovery runtime events emitted.
+    11. `test_final_run_result_reflects_verification_outcome`: RunResult cleanly distinguishes execution vs verification success.
+    12. `test_regression_false_success_bug_eliminated`: Direct regression test proving false-success bug is eliminated.
+    13. `test_explicit_unverified_status_when_no_criteria`: Verifier returns unverified status when criteria are empty.
+    14. `test_verifier_detects_exit_code_and_test_failures`: Detects non-zero exit codes and test failure counts.
+    15. `test_existing_execution_behavior_remains_compatible`: Backward compatibility maintained for standard runs.
+  - Full test suite: **872 passed, 0 skipped, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
+- **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_17.zip`.
+- **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning Correction #18.

@@ -34,9 +34,11 @@ from clairecoder.execution.types import (
 )
 from clairecoder.verification.types import (
     VerificationCriterion,
+    VerificationResult,
     VerificationStatus,
     VerificationTestType,
 )
+from clairecoder.verification.verifier import Verifier, DefaultVerifier
 from clairecoder.runtime.events import EventType, RuntimeEvent
 from clairecoder.runtime.emitter import EventEmitter
 from clairecoder.changeset.types import (
@@ -57,7 +59,7 @@ class RunResult:
     """Structured result returned by AgentRuntime.run().
 
     Enables programmatic inspection of run success, completion,
-    failures, blocked tasks, and evidence.
+    failures, blocked tasks, verification results, and recovery.
     """
     success: bool
     run_id: str
@@ -68,6 +70,11 @@ class RunResult:
     failure_reason: Optional[str] = None
     task_graph: Optional[TaskGraph] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    execution_success: bool = True
+    verification_success: bool = True
+    recovered_success: bool = False
+    final_failure: bool = False
+    verification_results: Dict[str, VerificationResult] = field(default_factory=dict)
 
 
 # =============================================================================
@@ -91,6 +98,7 @@ class AgentRuntime:
         config_manager: Optional[Any] = None,
         workspace_root: Optional[str] = None,
         changeset_store: Optional[ChangeSetStore] = None,
+        max_task_retries: int = 0,
     ) -> None:
         self._planner = planner if planner is not None else Planner()
         self._executor = executor
@@ -104,6 +112,7 @@ class AgentRuntime:
         self._config_manager = config_manager
         self._workspace_root = workspace_root
         self._changeset_store = changeset_store if changeset_store is not None else ChangeSetStore()
+        self._max_task_retries = max_task_retries
 
     @property
     def event_emitter(self) -> EventEmitter:
@@ -116,6 +125,24 @@ class AgentRuntime:
     @property
     def changeset_store(self) -> ChangeSetStore:
         return self._changeset_store
+
+    @property
+    def max_task_retries(self) -> int:
+        return self._max_task_retries
+
+    def _get_max_retries(self, task: Task, max_task_retries: int) -> int:
+        """Resolve maximum allowed retries for a task."""
+        if getattr(task, "max_retries", None) is not None:
+            return task.max_retries  # type: ignore[return-value]
+        return max_task_retries
+
+    def _can_retry_task(self, task: Task, max_task_retries: int) -> bool:
+        """Determine whether a task is eligible for retry."""
+        limit = self._get_max_retries(task, max_task_retries)
+        if limit <= 0:
+            return False
+        retries_done = max(0, task.attempts - 1)
+        return retries_done < limit
 
     # =========================================================================
     # PRIMARY EXECUTION ENTRY POINT
@@ -131,6 +158,7 @@ class AgentRuntime:
         active_model: Optional[str] = None,
         run_id: Optional[str] = None,
         objective_id: Optional[str] = None,
+        max_task_retries: Optional[int] = None,
     ) -> RunResult:
         """Run the engineering loop for an objective until complete, failed, or cancelled.
 
@@ -142,14 +170,17 @@ class AgentRuntime:
                - execute (TOOL_STARTED, etc.)
                - if execution failed:
                    mark_failed (TASK_FAILED) -> blocks dependents
+                   recovery / retry if permitted
                - if execution succeeded:
-                   verify (VERIFICATION_STARTED / COMPLETED)
+                   mark_executed -> mark_verifying
+                   verify (VERIFICATION_STARTED / VERIFICATION_PASSED / VERIFICATION_FAILED)
                    if passed: mark_completed (TASK_COMPLETED) -> unlocks dependents
-                   if failed: mark_failed (TASK_FAILED) -> blocks dependents
+                   if failed: mark_failed (TASK_FAILED) -> blocks dependents -> recovery / retry
             4. Emit RUN_COMPLETED or RUN_FAILED
             5. Return structured RunResult
         """
         run_id = run_id or f"run_{uuid.uuid4().hex[:8]}"
+        task_retries_limit = max_task_retries if max_task_retries is not None else self._max_task_retries
 
         # Resolve objective parameters
         if hasattr(objective, "id") and hasattr(objective, "request"):
@@ -217,6 +248,8 @@ class AgentRuntime:
         # 3. Main Agent Execution Loop
         cycles = 0
         replan_count = 0
+        has_recovered_attempts = False
+        verification_results: Dict[str, VerificationResult] = {}
 
         while not graph.all_completed() and cycles < max_cycles:
             cycles += 1
@@ -237,6 +270,9 @@ class AgentRuntime:
                     objective_id=objective_id,
                     graph=graph,
                     failure_reason="Execution interrupted or cancelled by user",
+                    execution_success=False,
+                    verification_success=False,
+                    verification_results=verification_results,
                 )
 
             ready_tasks = graph.get_ready_tasks()
@@ -244,8 +280,27 @@ class AgentRuntime:
             if not ready_tasks:
                 if graph.has_failures():
                     # Check if replanning is allowed
-                    if replan_count < max_replans and self._can_replan():
+                    if replan_count < max_replans and self._can_replan(has_provided_graph=(task_graph is not None)):
                         replan_count += 1
+                        self._emit(
+                            EventType.RECOVERY_STARTED,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            payload={
+                                "recovery_type": "replan",
+                                "replan_count": replan_count,
+                                "max_replans": max_replans,
+                            },
+                        )
+                        self._emit(
+                            EventType.REPLAN_STARTED,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            payload={
+                                "replan_count": replan_count,
+                                "max_replans": max_replans,
+                            },
+                        )
                         new_graph, new_plan = self._replan(
                             objective_req=objective_req,
                             objective_id=objective_id,
@@ -260,9 +315,31 @@ class AgentRuntime:
                         if new_graph:
                             graph = new_graph
                             plan = new_plan
+                            has_recovered_attempts = True
                             continue
+                        else:
+                            self._emit(
+                                EventType.RECOVERY_FAILED,
+                                run_id=run_id,
+                                objective_id=objective_id,
+                                payload={
+                                    "recovery_type": "replan",
+                                    "replan_count": replan_count,
+                                    "reason": "Replanning failed to generate a new graph",
+                                },
+                            )
 
                     # No replans remain — terminal failure
+                    if replan_count > 0 or has_recovered_attempts:
+                        self._emit(
+                            EventType.RECOVERY_FAILED,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            payload={
+                                "recovery_type": "replan" if replan_count > 0 else "retry",
+                                "reason": "Recovery exhausted: all retries and replans completed without success",
+                            },
+                        )
                     break
                 else:
                     # No ready tasks and no failures (e.g. empty or unresolvable)
@@ -336,9 +413,15 @@ class AgentRuntime:
                         else (exec_result.error_message or "Execution failed")
                     )
                     evidence_payload = {
-                        "type": "execution_failure",
+                        "task_id": task_id,
+                        "kind": "execution_failure",
                         "error": exec_result.error_message or "Execution failed",
+                        "message": exec_result.error_message or "Execution failed",
                         "detail": failure_detail,
+                        "evidence": failure_detail,
+                        "attempt": attempt_num,
+                        "changeset_id": changeset.id,
+                        "affected_files": [cf.path for cf in changeset.files] if changeset.files else [],
                     }
 
                     # Mark failed in graph (emits TASK_FAILED, cascades BLOCKED to dependents)
@@ -346,15 +429,68 @@ class AgentRuntime:
 
                     # Sync failure to execution manager and engine
                     self._sync_task_failure(task_id, session_id, exec_id, exec_result)
-                    continue
 
-                # --- Execution Succeeded -> Run Verification ---
+                    # Recovery: determine if retry is allowed
+                    if self._can_retry_task(task, task_retries_limit):
+                        has_recovered_attempts = True
+                        max_retries_val = self._get_max_retries(task, task_retries_limit)
+                        self._emit(
+                            EventType.RECOVERY_STARTED,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            task_id=task_id,
+                            payload={
+                                "task_id": task_id,
+                                "recovery_type": "retry",
+                                "attempt": attempt_num,
+                                "max_retries": max_retries_val,
+                                "failure": evidence_payload,
+                            },
+                        )
+                        self._emit(
+                            EventType.RETRY_STARTED,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            task_id=task_id,
+                            payload={
+                                "task_id": task_id,
+                                "attempt": attempt_num + 1,
+                                "max_retries": max_retries_val,
+                            },
+                        )
+                        graph.mark_retrying(task_id)
+                        continue
+                    else:
+                        if attempt_num > 1:
+                            self._emit(
+                                EventType.RECOVERY_FAILED,
+                                run_id=run_id,
+                                objective_id=objective_id,
+                                task_id=task_id,
+                                payload={
+                                    "task_id": task_id,
+                                    "recovery_type": "retry",
+                                    "attempt": attempt_num,
+                                    "reason": f"Retry budget exhausted after {attempt_num} attempts",
+                                    "failure": evidence_payload,
+                                },
+                            )
+                        continue
+
+                # --- Execution Succeeded -> Transition to EXECUTED then VERIFYING ---
+                graph.mark_executed(task_id)
+                graph.mark_verifying(task_id)
+
                 self._emit(
                     EventType.VERIFICATION_STARTED,
                     run_id=run_id,
                     objective_id=objective_id,
                     task_id=task_id,
-                    payload={"task_id": task_id, "title": task.title},
+                    payload={
+                        "task_id": task_id,
+                        "title": task.title,
+                        "changeset_id": changeset.id if changeset else None,
+                    },
                 )
                 if self._workflow_manager:
                     wf = self._workflow_manager.get_workflow(workflow_id)
@@ -362,36 +498,97 @@ class AgentRuntime:
                         self._workflow_manager.transition_state(workflow_id, WorkflowState.VALIDATING)
 
                 try:
-                    ver_result, passed = self._verify_task(
-                        task, exec_result, session_id=session_id, attempt_number=attempt_num
+                    ver_result = self._verify_task(
+                        task,
+                        exec_result,
+                        changeset=changeset,
+                        session_id=session_id,
+                        attempt_number=attempt_num,
                     )
+                    passed = ver_result.success if hasattr(ver_result, "success") else bool(ver_result)
                 except Exception as e:
-                    ver_result = {"error": str(e)}
+                    ver_result = VerificationResult(
+                        task_id=task_id,
+                        success=False,
+                        status=VerificationStatus.FAILED,
+                        failures=[str(e)],
+                        evidence=[f"Verification error: {e}"],
+                        changeset_id=changeset.id if changeset else None,
+                    )
                     passed = False
 
+                if isinstance(ver_result, VerificationResult):
+                    verification_results[task_id] = ver_result
+
                 if passed:
+                    self._emit(
+                        EventType.VERIFICATION_PASSED,
+                        run_id=run_id,
+                        objective_id=objective_id,
+                        task_id=task_id,
+                        payload={
+                            "task_id": task_id,
+                            "passed": True,
+                            "checks": getattr(ver_result, "checks", []),
+                            "evidence": getattr(ver_result, "evidence", []),
+                            "changeset_id": getattr(ver_result, "changeset_id", None),
+                        },
+                    )
                     self._emit(
                         EventType.VERIFICATION_COMPLETED,
                         run_id=run_id,
                         objective_id=objective_id,
                         task_id=task_id,
-                        payload={"task_id": task_id, "passed": True},
+                        payload={
+                            "task_id": task_id,
+                            "passed": True,
+                            "checks": getattr(ver_result, "checks", []),
+                        },
                     )
                     # Complete task in graph (emits TASK_COMPLETED, unlocks dependents to READY)
                     graph.mark_completed(task_id)
                     self._sync_task_success(task_id, session_id, exec_id, exec_result)
+
+                    if task.attempts > 1:
+                        has_recovered_attempts = True
+                        self._emit(
+                            EventType.RECOVERY_COMPLETED,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            task_id=task_id,
+                            payload={
+                                "task_id": task_id,
+                                "recovery_type": "retry",
+                                "attempt": task.attempts,
+                            },
+                        )
                 else:
+                    failures_list = getattr(ver_result, "failures", []) or ["Verification failed"]
+                    evidence_list = getattr(ver_result, "evidence", [])
                     self._emit(
                         EventType.VERIFICATION_FAILED,
                         run_id=run_id,
                         objective_id=objective_id,
                         task_id=task_id,
-                        payload={"task_id": task_id, "passed": False},
+                        payload={
+                            "task_id": task_id,
+                            "passed": False,
+                            "failures": failures_list,
+                            "evidence": evidence_list,
+                            "changeset_id": getattr(ver_result, "changeset_id", None),
+                        },
                     )
                     ver_evidence = {
-                        "type": "verification_failure",
-                        "error": "Verification failed",
+                        "task_id": task_id,
+                        "kind": "verification_failure",
+                        "error": "; ".join(str(f) for f in failures_list) if failures_list else "Verification failed",
+                        "message": "; ".join(str(f) for f in failures_list) if failures_list else "Verification failed",
                         "detail": str(ver_result),
+                        "evidence": evidence_list or str(ver_result),
+                        "failures": failures_list,
+                        "attempt": attempt_num,
+                        "changeset_id": changeset.id if changeset else None,
+                        "affected_files": [cf.path for cf in changeset.files] if changeset and changeset.files else [],
                     }
                     exec_result.category = ExecutionResultCategory.FAILURE
                     exec_result.failure_category = FailureCategory.VALIDATION_FAILURE
@@ -399,8 +596,57 @@ class AgentRuntime:
                     graph.mark_failed(task_id, evidence=ver_evidence)
                     self._sync_task_verification_failure(task_id, session_id, exec_id, exec_result)
 
+                    # Recovery: determine if retry is allowed
+                    if self._can_retry_task(task, task_retries_limit):
+                        has_recovered_attempts = True
+                        max_retries_val = self._get_max_retries(task, task_retries_limit)
+                        self._emit(
+                            EventType.RECOVERY_STARTED,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            task_id=task_id,
+                            payload={
+                                "task_id": task_id,
+                                "recovery_type": "retry",
+                                "attempt": attempt_num,
+                                "max_retries": max_retries_val,
+                                "failure": ver_evidence,
+                            },
+                        )
+                        self._emit(
+                            EventType.RETRY_STARTED,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            task_id=task_id,
+                            payload={
+                                "task_id": task_id,
+                                "attempt": attempt_num + 1,
+                                "max_retries": max_retries_val,
+                            },
+                        )
+                        graph.mark_retrying(task_id)
+                        continue
+                    else:
+                        if attempt_num > 1:
+                            self._emit(
+                                EventType.RECOVERY_FAILED,
+                                run_id=run_id,
+                                objective_id=objective_id,
+                                task_id=task_id,
+                                payload={
+                                    "task_id": task_id,
+                                    "recovery_type": "retry",
+                                    "attempt": attempt_num,
+                                    "reason": f"Retry budget exhausted after {attempt_num} attempts",
+                                    "failure": ver_evidence,
+                                },
+                            )
+                        continue
+
         # 4. Final Completion Determination (Section 11)
-        is_complete = graph.all_completed() and graph.task_count > 0
+        any_failed = any(t.status == TaskState.FAILED for t in graph.tasks)
+        any_blocked = any(t.status == TaskState.BLOCKED for t in graph.tasks)
+        is_complete = graph.all_completed() and graph.task_count > 0 and not any_failed and not any_blocked
 
         # Check explicit workflow completion criteria if WorkflowManager is configured
         if is_complete and self._workflow_manager:
@@ -431,6 +677,18 @@ class AgentRuntime:
             if self._engineering_engine and session_id:
                 self._engineering_engine.complete_objective(session_id)
 
+            if has_recovered_attempts or replan_count > 0:
+                self._emit(
+                    EventType.RECOVERY_COMPLETED,
+                    run_id=run_id,
+                    objective_id=objective_id,
+                    payload={
+                        "recovery_type": "replan" if replan_count > 0 else "retry",
+                        "replan_count": replan_count,
+                        "status": "success",
+                    },
+                )
+
             self._emit(
                 EventType.RUN_COMPLETED,
                 run_id=run_id,
@@ -447,6 +705,10 @@ class AgentRuntime:
                 run_id=run_id,
                 objective_id=objective_id,
                 graph=graph,
+                execution_success=True,
+                verification_success=True,
+                recovered_success=(has_recovered_attempts or replan_count > 0),
+                verification_results=verification_results,
             )
         else:
             # Build failure reason from collected evidence
@@ -455,10 +717,25 @@ class AgentRuntime:
                 if t.status == TaskState.FAILED:
                     for ev in t.failure_evidence:
                         if isinstance(ev, dict) and "error" in ev:
-                            failure_reasons.append(ev["error"])
+                            failure_reasons.append(str(ev["error"]))
+                        elif isinstance(ev, dict) and "message" in ev:
+                            failure_reasons.append(str(ev["message"]))
                         else:
                             failure_reasons.append(str(ev))
             reason = "; ".join(failure_reasons) if failure_reasons else "Run failed or blocked"
+
+            final_exec_failed = any(
+                t.status == TaskState.FAILED and any(
+                    isinstance(ev, dict) and ev.get("kind") == "execution_failure" for ev in t.failure_evidence
+                )
+                for t in graph.tasks
+            )
+            final_ver_failed = any(
+                t.status == TaskState.FAILED and any(
+                    isinstance(ev, dict) and ev.get("kind") == "verification_failure" for ev in t.failure_evidence
+                )
+                for t in graph.tasks
+            )
 
             if self._workflow_manager:
                 wf = self._workflow_manager.get_workflow(workflow_id)
@@ -494,6 +771,10 @@ class AgentRuntime:
                 objective_id=objective_id,
                 graph=graph,
                 failure_reason=reason,
+                execution_success=not final_exec_failed,
+                verification_success=not final_ver_failed,
+                recovered_success=False,
+                verification_results=verification_results,
             )
 
     # =========================================================================
@@ -664,7 +945,10 @@ class AgentRuntime:
         # 1. Custom executor passed to runtime
         if self._executor is not None:
             if hasattr(self._executor, "execute"):
-                res = self._executor.execute(task, session_id=session_id)
+                try:
+                    res = self._executor.execute(task, session_id=session_id)
+                except TypeError:
+                    res = self._executor.execute(task)
             elif callable(self._executor):
                 res = self._executor(task)
             else:
@@ -702,67 +986,102 @@ class AgentRuntime:
         self,
         task: Task,
         exec_result: ExecutionResult,
+        changeset: Optional[ChangeSet] = None,
         session_id: Optional[str] = None,
         attempt_number: int = 1,
-    ) -> Tuple[Any, bool]:
+    ) -> VerificationResult:
         """Verify task execution via verifier boundary."""
-        # 1. Custom verifier
+        changeset_id = getattr(changeset, "id", getattr(exec_result, "changeset_id", None))
+
+        # 1. Custom verifier (object with .verify or callable)
         if self._verifier is not None and not hasattr(self._verifier, "create_verification"):
             if hasattr(self._verifier, "verify"):
-                v_res = self._verifier.verify(task, exec_result, session_id=session_id)
+                try:
+                    v_res = self._verifier.verify(
+                        task,
+                        exec_result,
+                        changeset=changeset,
+                        session_id=session_id,
+                        attempt_number=attempt_number,
+                    )
+                except TypeError:
+                    v_res = self._verifier.verify(task, exec_result)
             elif callable(self._verifier):
                 v_res = self._verifier(task, exec_result)
             else:
                 raise TypeError(f"Unsupported verifier: {type(self._verifier)}")
 
+            if isinstance(v_res, VerificationResult):
+                if changeset_id and not v_res.changeset_id:
+                    v_res.changeset_id = changeset_id
+                return v_res
+
             if isinstance(v_res, bool):
-                return v_res, v_res
-            if hasattr(v_res, "success"):
-                return v_res, bool(v_res.success)
-            if hasattr(v_res, "status"):
-                return v_res, v_res.status == VerificationStatus.PASSED
-            return v_res, True
-
-        # 2. VerificationEngine
-        v_engine = self._verification_engine or (self._verifier if hasattr(self._verifier, "create_verification") else None)
-        if v_engine:
-            val_reqs = list(getattr(task, "validation_requirements", []) or getattr(task, "validation", []) or [])
-
-            # Objective keyword fallback
-            if not val_reqs and session_id and self._engineering_engine:
-                sess = self._engineering_engine.get_session(session_id)
-                if sess and sess.objective:
-                    req_text = sess.objective.request.lower()
-                    if "verify" in req_text or "create" in req_text:
-                        val_reqs = [sess.objective.request]
-
-            if not val_reqs:
-                return None, True
-
-            criteria = [
-                VerificationCriterion(
-                    id=f"{task.id}:{idx}",
-                    description=req,
-                    test_type=VerificationTestType.UNIT,
+                return VerificationResult(
+                    task_id=task.id,
+                    success=v_res,
+                    status=VerificationStatus.PASSED if v_res else VerificationStatus.FAILED,
+                    checks=["custom_verifier_bool"],
+                    failures=[] if v_res else ["Verifier rejected task execution"],
+                    evidence=["Custom verifier returned " + str(v_res)],
+                    changeset_id=changeset_id,
                 )
-                for idx, req in enumerate(val_reqs)
-            ]
 
-            v_id = f"v_{task.id}_{attempt_number}"
-            v_engine.create_verification(v_id, task.id, criteria)
-            v_engine.start_verification(v_id)
-            v_res = v_engine.execute_verification(v_id)
-            passed = (v_res.status == VerificationStatus.PASSED)
-            return v_res, passed
+            if hasattr(v_res, "success"):
+                is_success = bool(v_res.success)
+                return VerificationResult(
+                    task_id=task.id,
+                    success=is_success,
+                    status=getattr(v_res, "status", VerificationStatus.PASSED if is_success else VerificationStatus.FAILED),
+                    checks=getattr(v_res, "checks", ["custom_verifier"]),
+                    failures=getattr(v_res, "failures", [] if is_success else ["Verifier indicated failure"]),
+                    evidence=getattr(v_res, "evidence", []),
+                    changeset_id=changeset_id,
+                    metadata=getattr(v_res, "metadata", {}),
+                )
 
-        # 3. Default fallback
-        return None, True
+            if hasattr(v_res, "status"):
+                is_passed = (v_res.status == VerificationStatus.PASSED)
+                return VerificationResult(
+                    task_id=task.id,
+                    success=is_passed,
+                    status=v_res.status,
+                    checks=getattr(v_res, "checks", ["custom_verifier"]),
+                    failures=getattr(v_res, "failures", [] if is_passed else ["Verification status not passed"]),
+                    evidence=getattr(v_res, "evidence", []),
+                    changeset_id=changeset_id,
+                )
+
+            return VerificationResult(
+                task_id=task.id,
+                success=True,
+                status=VerificationStatus.PASSED,
+                checks=["custom_verifier_object"],
+                evidence=[str(v_res)],
+                changeset_id=changeset_id,
+            )
+
+        # 2. VerificationEngine or DefaultVerifier
+        v_engine = self._verification_engine or (self._verifier if hasattr(self._verifier, "create_verification") else None)
+        default_verifier = DefaultVerifier(
+            engine=v_engine,
+            workspace_root=self._workspace_root,
+        )
+        return default_verifier.verify(
+            task=task,
+            execution_result=exec_result,
+            changeset=changeset,
+            session_id=session_id,
+            attempt_number=attempt_number,
+        )
 
     # =========================================================================
     # REPLANNING SUPPORT
     # =========================================================================
 
-    def _can_replan(self) -> bool:
+    def _can_replan(self, has_provided_graph: bool = False) -> bool:
+        if has_provided_graph:
+            return False
         return self._planner is not None
 
     def _replan(
@@ -822,9 +1141,9 @@ class AgentRuntime:
             )
 
         model_resp = None
-        if self._engineering_engine and active_model:
+        if hasattr(self._planner, "build_replan_request"):
             use_structured = True
-            if self._model_gateway and hasattr(self._model_gateway, "check_capability"):
+            if self._model_gateway and hasattr(self._model_gateway, "check_capability") and active_model:
                 from clairecoder.gateway.types import Capability
                 try:
                     use_structured = (
@@ -834,16 +1153,17 @@ class AgentRuntime:
                 except Exception:
                     use_structured = True
 
-            req = self._planner.build_replan_request(
-                objective=objective_req,
-                previous_plan=current_plan,
-                failure_reason=failure_reason,
-                context_summary="Replanning phase",
-                model_id=active_model,
-                use_structured_output=use_structured,
-            )
             try:
-                model_resp = self._engineering_engine.execute_model(req)
+                req = self._planner.build_replan_request(
+                    objective=objective_req,
+                    previous_plan=current_plan,
+                    failure_reason=failure_reason,
+                    context_summary="Replanning phase",
+                    model_id=active_model,
+                    use_structured_output=use_structured,
+                )
+                if self._engineering_engine and active_model and req is not None:
+                    model_resp = self._engineering_engine.execute_model(req)
             except Exception:
                 model_resp = None
 
@@ -1103,15 +1423,33 @@ class AgentRuntime:
         objective_id: str,
         graph: TaskGraph,
         failure_reason: Optional[str] = None,
+        execution_success: bool = True,
+        verification_success: bool = True,
+        recovered_success: bool = False,
+        verification_results: Optional[Dict[str, VerificationResult]] = None,
     ) -> RunResult:
         """Construct the authoritative RunResult from TaskGraph state."""
+        completed = [t.id for t in graph.tasks if t.status == TaskState.SUCCEEDED]
+        failed = [t.id for t in graph.tasks if t.status == TaskState.FAILED]
+        blocked = [t.id for t in graph.tasks if t.status == TaskState.BLOCKED]
+
+        # Strict monotonic guarantee: a run can never be marked successful if
+        # there are failed or blocked tasks, if graph is empty, or if verification/execution failed!
+        if failed or blocked or not graph.all_completed() or graph.task_count == 0 or not verification_success or not execution_success:
+            success = False
+
         return RunResult(
             success=success,
             run_id=run_id,
             objective_id=objective_id,
-            completed_tasks=[t.id for t in graph.tasks if t.status == TaskState.SUCCEEDED],
-            failed_tasks=[t.id for t in graph.tasks if t.status == TaskState.FAILED],
-            blocked_tasks=[t.id for t in graph.tasks if t.status == TaskState.BLOCKED],
+            completed_tasks=completed,
+            failed_tasks=failed,
+            blocked_tasks=blocked,
             failure_reason=failure_reason,
             task_graph=graph,
+            execution_success=execution_success,
+            verification_success=verification_success,
+            recovered_success=recovered_success,
+            final_failure=not success,
+            verification_results=verification_results or {},
         )

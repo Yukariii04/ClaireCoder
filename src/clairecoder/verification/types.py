@@ -12,7 +12,7 @@ This module defines the data models for the Verification subsystem:
 """
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
 
@@ -152,3 +152,62 @@ class Verification:
     failure_category: Optional[FailureCategory] = None
     attempt_number: int = 1
     max_retries: int = 3
+
+
+@dataclass
+class VerificationResult:
+    """Structured result of a task verification boundary (Correction #17).
+
+    Distinguishes execution success from verification correctness and
+    preserves verification evidence, performed checks, and failure reasons.
+    """
+    task_id: str
+    success: bool
+    status: Union[VerificationStatus, str] = VerificationStatus.PASSED
+    checks: List[str] = field(default_factory=list)
+    evidence: List[Any] = field(default_factory=list)
+    failures: List[str] = field(default_factory=list)
+    duration: Optional[float] = None
+    changeset_id: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __iter__(self):
+        """Enable tuple unpacking: ver_result, passed = result."""
+        yield self
+        yield self.success
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize VerificationResult to dictionary."""
+        return {
+            "task_id": self.task_id,
+            "success": self.success,
+            "status": self.status.value if hasattr(self.status, "value") else str(self.status),
+            "checks": list(self.checks),
+            "evidence": list(self.evidence),
+            "failures": list(self.failures),
+            "duration": self.duration,
+            "changeset_id": self.changeset_id,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VerificationResult":
+        """Deserialize VerificationResult from dictionary."""
+        raw_status = data.get("status", "passed")
+        try:
+            status = VerificationStatus(raw_status)
+        except (ValueError, KeyError):
+            status = VerificationStatus.PASSED if data.get("success", False) else VerificationStatus.FAILED
+
+        return cls(
+            task_id=data.get("task_id", ""),
+            success=bool(data.get("success", False)),
+            status=status,
+            checks=list(data.get("checks", [])),
+            evidence=list(data.get("evidence", [])),
+            failures=list(data.get("failures", [])),
+            duration=data.get("duration"),
+            changeset_id=data.get("changeset_id"),
+            metadata=dict(data.get("metadata", {})),
+        )
+

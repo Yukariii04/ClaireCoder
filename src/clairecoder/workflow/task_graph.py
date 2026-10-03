@@ -300,16 +300,41 @@ class TaskGraph:
             "type": task.type.value,
         })
 
+    def mark_executed(self, task_id: str) -> None:
+        """Mark a task as executed (RUNNING → EXECUTED).
+
+        Correction #17: Explicit state indicating execution completed
+        prior to verification evaluation.
+        """
+        task = self._require_task(task_id)
+        if task.status != TaskState.RUNNING:
+            raise TaskGraphError(
+                f"Cannot mark task '{task_id}' executed: status is {task.status.value}, expected RUNNING"
+            )
+        task.status = TaskState.EXECUTED
+
+    def mark_verifying(self, task_id: str) -> None:
+        """Mark a task as actively undergoing verification (RUNNING or EXECUTED → VERIFYING).
+
+        Correction #17: Explicit state during verifier evaluation.
+        """
+        task = self._require_task(task_id)
+        if task.status not in (TaskState.RUNNING, TaskState.EXECUTED):
+            raise TaskGraphError(
+                f"Cannot mark task '{task_id}' verifying: status is {task.status.value}, expected RUNNING or EXECUTED"
+            )
+        task.status = TaskState.VERIFYING
+
     def mark_completed(self, task_id: str) -> None:
-        """Mark a task as completed (RUNNING → SUCCEEDED).
+        """Mark a task as completed (RUNNING / EXECUTED / VERIFYING → SUCCEEDED).
 
         Triggers re-evaluation of dependent tasks.
         """
         task = self._require_task(task_id)
 
-        if task.status != TaskState.RUNNING:
+        if task.status not in (TaskState.RUNNING, TaskState.EXECUTED, TaskState.VERIFYING):
             raise TaskGraphError(
-                f"Cannot complete task '{task_id}': status is {task.status.value}, expected RUNNING"
+                f"Cannot complete task '{task_id}': status is {task.status.value}, expected RUNNING, EXECUTED, or VERIFYING"
             )
 
         task.status = TaskState.SUCCEEDED
@@ -328,15 +353,15 @@ class TaskGraph:
         task_id: str,
         evidence: Optional[Union[Dict[str, Any], List[Dict[str, Any]], str]] = None,
     ) -> None:
-        """Mark a task as failed (RUNNING → FAILED).
+        """Mark a task as failed (RUNNING / EXECUTED / VERIFYING → FAILED).
 
         Preserves failure evidence and propagates BLOCKED to dependents.
         """
         task = self._require_task(task_id)
 
-        if task.status != TaskState.RUNNING:
+        if task.status not in (TaskState.RUNNING, TaskState.EXECUTED, TaskState.VERIFYING):
             raise TaskGraphError(
-                f"Cannot fail task '{task_id}': status is {task.status.value}, expected RUNNING"
+                f"Cannot fail task '{task_id}': status is {task.status.value}, expected RUNNING, EXECUTED, or VERIFYING"
             )
 
         task.status = TaskState.FAILED

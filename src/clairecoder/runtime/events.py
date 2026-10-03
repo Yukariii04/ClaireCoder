@@ -61,10 +61,18 @@ class EventType(str, Enum):
     COMMAND_COMPLETED = "command.completed"
     COMMAND_FAILED = "command.failed"
 
-    # --- Verification ---
+    # --- Verification (Correction #17) ---
     VERIFICATION_STARTED = "verification.started"
+    VERIFICATION_PASSED = "verification.passed"
     VERIFICATION_COMPLETED = "verification.completed"
     VERIFICATION_FAILED = "verification.failed"
+
+    # --- Recovery & Retry Lifecycle (Correction #17) ---
+    RECOVERY_STARTED = "recovery.started"
+    RETRY_STARTED = "retry.started"
+    REPLAN_STARTED = "replan.started"
+    RECOVERY_COMPLETED = "recovery.completed"
+    RECOVERY_FAILED = "recovery.failed"
 
     # --- Agent messages ---
     AGENT_MESSAGE = "agent.message"
