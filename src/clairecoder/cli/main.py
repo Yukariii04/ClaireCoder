@@ -6,6 +6,7 @@ import uuid
 from typing import Any, List, Optional
 
 from clairecoder.app import ClaireCoderV1
+from clairecoder.engine.types import EngineEvent
 from clairecoder.gateway.types import ModelError
 from clairecoder.tui.app import TuiApplication
 from clairecoder.session.store import SessionStore
@@ -17,7 +18,7 @@ def run_direct(
     session_id: Optional[str] = None,
     app: Optional[ClaireCoderV1] = None,
 ) -> int:
-    """Execute direct non-interactive objective submission via ClaireCoderV1 application."""
+    """Execute an objective, prompting for supervised tool approvals when interactive."""
     if app is None:
         app = ClaireCoderV1(workspace_root=os.getcwd())
 
@@ -35,10 +36,48 @@ def run_direct(
     app.submit_objective(sid, objective, start_background=False)
 
     try:
-        app.run(sid)
+        if sys.stdin.isatty():
+            def request_permission(event, payload):
+                if event != EngineEvent.PERMISSION_REQUESTED:
+                    return
+                command = payload.get("command") or f"{payload.get('action', 'use')} {payload.get('resource', '')}".strip()
+                print(f"\nPermission requested: {command}")
+                while True:
+                    answer = input("Allow once [y], allow for this session [a], or deny [n]? ").strip().lower()
+                    if answer in {"y", "yes"}:
+                        decision = "approve"
+                        break
+                    if answer in {"a", "always", "always_session"}:
+                        decision = "always_session"
+                        break
+                    if answer in {"n", "no", "deny"}:
+                        decision = "deny"
+                        break
+                    print("Enter y, a, or n.")
+
+                app.interaction_controller.handle_permission_response(
+                    request_id=payload.get("request_id", ""),
+                    decision=decision,
+                    session_id=payload.get("session_id"),
+                    tool_id=payload.get("tool_id") or payload.get("tool_name"),
+                    action=payload.get("action"),
+                    resource=payload.get("resource"),
+                    command=payload.get("command"),
+                    category=payload.get("category"),
+                )
+
+            app.engineering_engine.subscribe(request_permission)
+        else:
+            # A headless invocation cannot resolve supervised tool requests.
+            # Fail promptly with guidance instead of waiting for a UI that is absent.
+            app.engineering_engine.permission_wait_timeout_seconds = 0.0
+
+        result = app.run(sid)
         status = app.status(sid)
         obj_status = status.get("objective", {}).get("status", "unknown")
         print(f"Execution finished with status: {obj_status}")
+        if not result.success and result.failure_reason:
+            print(f"Execution failed: {result.failure_reason}", file=sys.stderr)
         return 0 if obj_status == "completed" else 1
     except ModelError as me:
         print(f"Model error: {me}", file=sys.stderr)
@@ -83,6 +122,7 @@ def run_interactive(
 
     tui = TuiApplication(workspace_root=os.getcwd())
     tui.connect_controller(app.interaction_controller)
+    tui.connect_runtime(app.event_emitter)
     tui.connect_config_manager(app.config_manager)
     tui.register_runtime_sync_callback(app.load_providers_from_config)
 

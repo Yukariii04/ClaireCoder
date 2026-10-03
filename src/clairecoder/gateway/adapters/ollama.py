@@ -245,10 +245,17 @@ class OllamaAdapter(ProviderAdapterInterface):
         # Convert OpenAI-style messages to Ollama format
         messages = []
         for msg in request.messages:
-            messages.append({
+            converted = {
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", ""),
-            })
+            }
+            if msg.get("tool_calls"):
+                converted["tool_calls"] = msg["tool_calls"]
+            if msg.get("tool_call_id"):
+                converted["tool_call_id"] = msg["tool_call_id"]
+            if msg.get("name"):
+                converted["tool_name"] = msg["name"]
+            messages.append(converted)
 
         payload: Dict[str, Any] = {
             "model": request.model_id,

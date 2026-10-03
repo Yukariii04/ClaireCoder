@@ -81,7 +81,17 @@ class EngineBridge:
                 run_id=run_id,
                 task_id=task_id,
                 tool_call_id=tool_call_id,
-                payload={"tool": data.get("tool_name") or data.get("tool_id", "unknown")},
+                payload={
+                    "tool": data.get("tool_name") or data.get("tool_id", "unknown"),
+                    "arguments": {
+                        key: data[key]
+                        for key in ("path", "command", "target")
+                        if data.get(key) is not None
+                    },
+                    "path": data.get("path"),
+                    "command": data.get("command"),
+                    "target": data.get("target"),
+                },
             ))
             return
 
@@ -90,13 +100,26 @@ class EngineBridge:
             tool_name = data.get("tool_name") or data.get("tool_id", "unknown")
             metadata = data.get("metadata", {})
 
+            # A denied result carrying this marker is paused for approval, not
+            # a failed command that was actually executed.
+            if metadata.get("requires_confirmation"):
+                return
+
             # Emit file events if this is a file tool
             file_event = _extract_file_event(tool_name, tool_state, metadata, run_id, task_id, tool_call_id)
             if file_event:
                 self._emitter.emit(file_event)
 
             # Emit command events if this is a command tool
-            cmd_event = _extract_command_event(tool_name, tool_state, metadata, run_id, task_id, tool_call_id)
+            cmd_event = _extract_command_event(
+                tool_name,
+                tool_state,
+                metadata,
+                run_id,
+                task_id,
+                tool_call_id,
+                result=data.get("result"),
+            )
             if cmd_event:
                 self._emitter.emit(cmd_event)
 
@@ -295,8 +318,8 @@ def _extract_file_event(
         if "size" in metadata:
             payload["size"] = metadata["size"]
     elif tool_name in ("filesystem.write", "write_to_file"):
-        if metadata.get("bytes_written") is not None:
-            # New file creation (or overwrite)
+        if metadata.get("bytes_written") is not None and not metadata.get("existed_before", False):
+            # Distinguish a new file from overwriting an existing one.
             etype = EventType.FILE_CREATED
         else:
             etype = EventType.FILE_EDITED
@@ -338,20 +361,24 @@ def _extract_command_event(
     run_id: Optional[str],
     task_id: Optional[str],
     tool_call_id: Optional[str],
+    result: Any = None,
 ) -> Optional[RuntimeEvent]:
     """Produce COMMAND_* RuntimeEvent if this tool is a command/terminal tool."""
     if tool_name not in _COMMAND_TOOLS:
         return None
 
     payload: Dict[str, Any] = {}
-    if "command" in metadata:
-        payload["command"] = metadata["command"]
+    command = metadata.get("command") or metadata.get("target")
+    if command:
+        payload["command"] = command
     if "cwd" in metadata:
         payload["cwd"] = metadata["cwd"]
     if "exit_code" in metadata:
         payload["exit_code"] = metadata["exit_code"]
     if "duration_ms" in metadata:
         payload["duration_ms"] = metadata["duration_ms"]
+    if result:
+        payload["output"] = str(result)[:1200]
 
     if _is_failure_state(tool_state):
         return RuntimeEvent(

@@ -43,6 +43,10 @@ class TuiApplication:
         self.state = InputState.NORMAL
         self.running: bool = False
         self.controller = None
+        self._runtime_events_active = False
+        self._runtime_tui_listener = None
+        self._runtime_event_callback = None
+        self._runtime_unsubscribe = None
         self.on_interrupt: Optional[Callable[[], None]] = None
         self.on_permission_response: Optional[Callable[..., None]] = None
         
@@ -856,6 +860,59 @@ class TuiApplication:
         elif hasattr(controller, "subscribe_events"):
             controller.subscribe_events(self._on_engine_event)
 
+    def connect_runtime(self, event_emitter) -> None:
+        """Connect semantic runtime activity events to the visible transcript."""
+        from clairecoder.runtime.events import EventType
+        from clairecoder.runtime.tui_listener import RuntimeEventTuiListener
+
+        visible_types = {
+            EventType.TOOL_STARTED,
+            EventType.TOOL_COMPLETED,
+            EventType.TOOL_FAILED,
+            EventType.TASK_FAILED,
+            EventType.RUN_FAILED,
+            EventType.RUN_CANCELLED,
+            EventType.FILE_READ,
+            EventType.FILE_CREATED,
+            EventType.FILE_EDITED,
+            EventType.FILE_MODIFIED,
+            EventType.FILE_DELETED,
+            EventType.COMMAND_STARTED,
+            EventType.COMMAND_COMPLETED,
+            EventType.COMMAND_FAILED,
+            EventType.VERIFICATION_STARTED,
+            EventType.VERIFICATION_PASSED,
+            EventType.VERIFICATION_COMPLETED,
+            EventType.VERIFICATION_FAILED,
+            EventType.CHANGESET_COMPLETED,
+        }
+        listener = RuntimeEventTuiListener()
+
+        def _on_runtime_event(event):
+            if event.event_type not in visible_types:
+                return
+            activity = listener.event_to_activity(event)
+            if activity is not None:
+                self._on_runtime_activity(activity)
+
+        self._runtime_tui_listener = listener
+        self._runtime_event_callback = _on_runtime_event
+        self._runtime_unsubscribe = event_emitter.subscribe(_on_runtime_event)
+        self._runtime_events_active = True
+
+    def _on_runtime_activity(self, activity: ActivityModel) -> None:
+        """Queue activity from worker threads for the main render loop."""
+        if self._in_run_loop:
+            self._event_queue.put(activity)
+        else:
+            self._apply_activity(activity)
+
+    def _apply_activity(self, activity: ActivityModel) -> None:
+        if activity.updates_activity:
+            self.transcript.update_activity(activity)
+        else:
+            self.transcript.append_activity(activity)
+
     def set_command_router(self, router) -> None:
         """Sets the application-level command router/controller callback."""
         self.controller = router
@@ -1400,17 +1457,8 @@ class TuiApplication:
                     ))
                     if hasattr(self.controller, "process_natural_language"):
                         session_id = self.header.session_id or "default"
-                        msg = self.controller.process_natural_language(cmd_clean, session_id)
-                        if msg and str(msg).startswith("Objective accepted"):
-                            self.task_view.objective = cmd_clean
-                            # Note: do NOT emit "Starting objective" here — the engine's
-                            # OBJECTIVE_STARTED event (via PresentationAdapter) is the
-                            # authoritative source. Only record the acceptance message.
-                            self.transcript.append_activity(ActivityModel(
-                                type=ActivityType.MESSAGE,
-                                title="Objective accepted",
-                                detail=str(msg)
-                            ))
+                        self.controller.process_natural_language(cmd_clean, session_id)
+                        self.task_view.objective = cmd_clean
                         # Reset streaming buffer for new response
                         self._streaming_activity_key = f"stream_{hash(cmd_clean)}"
                         self._streaming_text_buffer = []
@@ -1438,13 +1486,17 @@ class TuiApplication:
             self.task_view.objective = cmd_clean
             self._action_history.append(f"PROMPT:{cmd_clean}")
             self.transcript.append_activity(ActivityModel(
-                type=ActivityType.MESSAGE,
+                type=ActivityType.WARNING,
                 title="Claire",
-                detail="Objective accepted."
+                detail="No coding engine is connected, so I could not start that task."
             ))
 
     def handle_event(self, event) -> None:
         """Processes events from the event stream and updates TUI state."""
+        if isinstance(event, ActivityModel):
+            self._apply_activity(event)
+            return
+
         if isinstance(event, dict):
             event_name = event.get("type", "").upper()
             payload = event
@@ -1608,6 +1660,21 @@ class TuiApplication:
             if not self.permission_surface.has_pending():
                 self.set_state(InputState.NORMAL)
 
+        # Runtime events now provide the semantic file, command, verification,
+        # planning, and task activity. Keep controller events for UI state and
+        # permissions, but do not project their generic duplicates into the feed.
+        runtime_projected_events = {
+            "OBJECTIVE_STARTED", "OBJECTIVE_COMPLETED",
+            "PLANNING_STARTED", "PLANNING_COMPLETED", "REPLANNING_STARTED",
+            "TASK_STARTED", "TASK_COMPLETED",
+            "TASK_FAILED",
+            "TOOL_REQUESTED", "TOOL_COMPLETED",
+            "VALIDATION_STARTED", "VALIDATION_COMPLETED", "VALIDATION_FAILED",
+            "EXECUTION_FAILED", "EXECUTION_CANCELLED",
+        }
+        if self._runtime_events_active and event_name in runtime_projected_events:
+            return
+
         # Translate event to activity and update transcript
         try:
             from .adapter import PresentationAdapter
@@ -1625,6 +1692,21 @@ class TuiApplication:
         if not self.permission_surface.has_pending():
             self.set_state(InputState.NORMAL)
 
+    def _confirmation_body(self, mode: TerminalMode, width: int, viewport_height: int) -> List[str]:
+        """Keep recent work visible while the permission card owns the prompt."""
+        card = self.permission_surface.render(mode=mode, width=width)
+        if len(card) >= viewport_height:
+            return card[-viewport_height:]
+
+        feed_capacity = max(0, viewport_height - len(card) - 1)
+        visible_feed = self.transcript.get_visible_lines()
+        feed = visible_feed[-feed_capacity:] if feed_capacity else []
+        body = list(feed)
+        if feed and card:
+            body.append("")
+        body.extend(card)
+        return body[-viewport_height:]
+
     def render(self) -> List[str]:
         """Renders the current terminal application frame conforming to mode and geometry."""
         mode = self.terminal.determine_mode()
@@ -1634,7 +1716,7 @@ class TuiApplication:
         if mode == TerminalMode.MINIMAL:
             lines: List[str] = [f"--- ClaireCoder (v0.1.0) [{self.header.mode}] ---"]
             if self.state == InputState.CONFIRMATION and self.permission_surface.has_pending():
-                body = self.permission_surface.render(mode=mode, width=width)
+                body = self._confirmation_body(mode=mode, width=width, viewport_height=vh)
             elif self.state == InputState.OVERLAY:
                 if self.active_overlay == "review":
                     body = self.review_overlay.render(mode=mode, width=width)
@@ -1663,7 +1745,7 @@ class TuiApplication:
             if hdr_str:
                 lines.extend(hdr_str.splitlines())
             if self.state == InputState.CONFIRMATION and self.permission_surface.has_pending():
-                body = self.permission_surface.render(mode=mode, width=width)
+                body = self._confirmation_body(mode=mode, width=width, viewport_height=vh)
             elif self.state == InputState.OVERLAY:
                 if self.active_overlay == "review":
                     body = self.review_overlay.render(mode=mode, width=width)
@@ -1736,8 +1818,8 @@ class TuiApplication:
 
         # 2. Main canvas body area (fixed vh rows)
         if self.state == InputState.CONFIRMATION and self.permission_surface.has_pending():
-            card_lines = self.permission_surface.render(mode=mode, width=inner_w)
-            body_lines = [f" {c}" for c in card_lines]
+            confirmation_lines = self._confirmation_body(mode=mode, width=inner_w, viewport_height=vh)
+            body_lines = [f" {c}" for c in confirmation_lines]
         elif self.state == InputState.OVERLAY:
             overlay_lines: List[str] = []
             if self.active_overlay == "wizard":

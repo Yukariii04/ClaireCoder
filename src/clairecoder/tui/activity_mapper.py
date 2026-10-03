@@ -23,6 +23,8 @@ from .activity import (
     ActivityModel,
     ActivityOperation,
     ActivityStatus,
+    DiffInfo,
+    DiffLine,
     ChangeSummaryItem,
     ExecutionChangeSummary,
     truncate_path,
@@ -111,6 +113,25 @@ def extract_command_summary(output: Any) -> Optional[str]:
     return None
 
 
+def _parse_unified_diff(diff: Any, limit: int = 8) -> Optional[DiffInfo]:
+    """Extract a compact, readable patch from file-tool diff metadata."""
+    if not diff:
+        return None
+    parsed: List[DiffLine] = []
+    for raw_line in str(diff).splitlines():
+        if raw_line.startswith(("+++", "---", "@@", "\\")):
+            continue
+        if raw_line.startswith("+"):
+            parsed.append(DiffLine(type="add", content=raw_line[1:]))
+        elif raw_line.startswith("-"):
+            parsed.append(DiffLine(type="remove", content=raw_line[1:]))
+        elif raw_line.startswith(" "):
+            parsed.append(DiffLine(type="context", content=raw_line[1:]))
+        if len(parsed) >= limit:
+            break
+    return DiffInfo(summary="Changed lines", lines=parsed) if parsed else None
+
+
 class ActivityMapper:
     """Translates RuntimeEvents, ToolResults, and ChangeSets into ActivityEvents."""
 
@@ -186,8 +207,8 @@ class ActivityMapper:
         if etype == EventType.TOOL_STARTED:
             tool = payload.get("tool", "tool")
             args = payload.get("arguments", {}) or {}
-            path = args.get("path", "")
-            cmd = args.get("command", "")
+            path = args.get("path") or payload.get("path", "")
+            cmd = args.get("command") or payload.get("command") or payload.get("target", "")
 
             if tool in ("read_file", "filesystem.read"):
                 return ActivityEvent(
@@ -217,7 +238,7 @@ class ActivityMapper:
                     correlation_key=corr_tool,
                     metadata=payload,
                 )
-            elif tool in ("run_command", "shell.execute", "terminal", "terminal.execute"):
+            elif tool in ("run_command", "shell.execute", "terminal", "terminal.execute", "testing.run", "diagnostics.lint"):
                 return ActivityEvent(
                     status=ActivityStatus.RUNNING,
                     operation=ActivityOperation.RUNNING,
@@ -294,7 +315,7 @@ class ActivityMapper:
                     correlation_key=corr_tool,
                     metadata=payload,
                 )
-            elif tool in ("run_command", "shell.execute", "terminal", "terminal.execute"):
+            elif tool in ("run_command", "shell.execute", "terminal", "terminal.execute", "testing.run", "diagnostics.lint"):
                 cmd = meta.get("command") or payload.get("command", "")
                 out_summary = extract_command_summary(payload.get("output") or meta.get("stdout"))
                 return ActivityEvent(
@@ -456,6 +477,7 @@ class ActivityMapper:
         if etype in (EventType.FILE_CREATED, EventType.FILE_EDITED, EventType.FILE_MODIFIED):
             path = payload.get("path", "file")
             is_new = (etype == EventType.FILE_CREATED)
+            diff_info = _parse_unified_diff(payload.get("diff"))
             return ActivityEvent(
                 status=ActivityStatus.COMPLETED,
                 operation=ActivityOperation.CREATING if is_new else ActivityOperation.EDITING,
@@ -463,6 +485,7 @@ class ActivityMapper:
                 file_path=str(path),
                 additions=payload.get("additions"),
                 deletions=payload.get("deletions"),
+                diff_info=diff_info,
                 correlation_key=f"rtool_{tool_call_id}" if tool_call_id else None,
                 metadata=payload,
             )

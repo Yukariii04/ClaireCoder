@@ -11,6 +11,7 @@ Provides real filesystem, search, and terminal execution with safety boundaries.
 §10 — Real diff after mutation.
 """
 import os
+import base64
 import subprocess
 import time
 import difflib
@@ -147,7 +148,8 @@ class WriteFileTool(Tool):
         try:
             # §10: Capture before-state for diff
             before = ""
-            if p.exists() and p.is_file():
+            existed_before = p.exists() and p.is_file()
+            if existed_before:
                 try:
                     before = p.read_text(encoding="utf-8", errors="replace")
                 except Exception:
@@ -164,6 +166,7 @@ class WriteFileTool(Tool):
                 output=f"Successfully wrote {len(content)} bytes to {path_str}",
                 metadata={
                     "path": str(p),
+                    "existed_before": existed_before,
                     "bytes_written": len(content),
                     "additions": diff_info["additions"],
                     "deletions": diff_info["deletions"],
@@ -441,7 +444,10 @@ class TerminalTool(Tool):
         return ToolMetadata(
             id="shell.execute",
             name="Terminal",
-            description="Execute a shell command.",
+            description=(
+                "Run a command in the project workspace. On Windows use PowerShell syntax; "
+                "on other platforms use the default POSIX shell. Use filesystem tools for file access."
+            ),
             version="1.0.0",
             category=ToolCategory.SHELL,
             input_schema={"command": {"type": "string", "required": True}},
@@ -465,14 +471,35 @@ class TerminalTool(Tool):
         start_time = time.time()
 
         try:
-            res = subprocess.run(
-                cmd,
-                shell=True,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            if os.name == "nt":
+                # Use the shell ClaireCoder tells the model to target. Encoded
+                # command input avoids quoting/escaping corruption in paths and
+                # nested PowerShell expressions.
+                encoded_command = base64.b64encode(cmd.encode("utf-16-le")).decode("ascii")
+                run_args = [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-EncodedCommand",
+                    encoded_command,
+                ]
+                res = subprocess.run(
+                    run_args,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            else:
+                res = subprocess.run(
+                    cmd,
+                    shell=True,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
             duration_ms = int((time.time() - start_time) * 1000)
             out = res.stdout
             if res.stderr:
@@ -661,7 +688,10 @@ class RunTestsTool(Tool):
         return ToolMetadata(
             id="testing.run",
             name="Run Tests",
-            description="Run the project test suite.",
+            description=(
+                "Run the project test suite. On Windows use PowerShell syntax; "
+                "on other platforms use the default POSIX shell."
+            ),
             version="1.0.0",
             category=ToolCategory.TESTING,
             input_schema={"target": {"type": "string", "required": False}},
@@ -680,10 +710,23 @@ class RunTestsTool(Tool):
         cwd = str(get_workspace_root())
         start_time = time.time()
         try:
-            res = subprocess.run(
-                target, shell=True, capture_output=True, text=True,
-                timeout=120, cwd=cwd,
-            )
+            if os.name == "nt":
+                encoded_target = base64.b64encode(target.encode("utf-16-le")).decode("ascii")
+                res = subprocess.run(
+                    [
+                        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                        "-EncodedCommand", encoded_target,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    cwd=cwd,
+                )
+            else:
+                res = subprocess.run(
+                    target, shell=True, capture_output=True, text=True,
+                    timeout=120, cwd=cwd,
+                )
             duration_ms = int((time.time() - start_time) * 1000)
             output = res.stdout or res.stderr
             return ToolResult(
@@ -724,7 +767,7 @@ class DiagnosticsTool(Tool):
 
     @property
     def required_permissions(self) -> List[PermissionRequirement]:
-        return [PermissionRequirement(action="read", resource="file", scope="project")]
+        return [PermissionRequirement(action="execute", resource="command", scope="project")]
 
     def validate_input(self, **kwargs: Any) -> None:
         if "path" in kwargs and not isinstance(kwargs["path"], str):
@@ -735,13 +778,22 @@ class DiagnosticsTool(Tool):
         # Try to run real diagnostics; report UNAVAILABLE if no linter found.
         path_arg = kwargs.get("path", ".")
         cwd = str(get_workspace_root())
+        try:
+            path_arg = str(_resolve_path(str(path_arg)))
+        except WorkspaceSecurityError as exc:
+            return ToolResult(
+                state=ToolState.FAILURE,
+                output=None,
+                error=str(exc),
+                metadata={"path": str(path_arg), "reason": "workspace_path_rejected"},
+            )
 
-        # Try ruff, flake8, pylint in order
-        for linter_cmd in ["ruff check", "flake8", "pylint --score=n"]:
-            full_cmd = f"{linter_cmd} {path_arg}"
+        # Try ruff, flake8, pylint in order without invoking a shell.
+        for linter_args in [("ruff", "check"), ("flake8",), ("pylint", "--score=n")]:
+            full_cmd = [*linter_args, path_arg]
             try:
                 res = subprocess.run(
-                    full_cmd, shell=True, capture_output=True, text=True,
+                    full_cmd, capture_output=True, text=True,
                     timeout=30, cwd=cwd,
                 )
                 output = res.stdout or res.stderr or ""
@@ -750,7 +802,13 @@ class DiagnosticsTool(Tool):
                     state=ToolState.SUCCESS if res.returncode == 0 else ToolState.FAILURE,
                     output=output or "No issues found.",
                     error=None if res.returncode == 0 else f"Linter found issues (exit code {res.returncode})",
-                    metadata={"linter": linter_cmd.split()[0], "issues": issues, "path": path_arg, "cwd": cwd},
+                    metadata={
+                        "linter": linter_args[0],
+                        "issues": issues,
+                        "path": path_arg,
+                        "cwd": cwd,
+                        "command": " ".join(full_cmd),
+                    },
                 )
             except FileNotFoundError:
                 continue  # Try next linter
@@ -758,7 +816,7 @@ class DiagnosticsTool(Tool):
                 return ToolResult(
                     state=ToolState.TIMEOUT,
                     output=None,
-                    error=f"Diagnostics timed out: {full_cmd}",
+                    error=f"Diagnostics timed out: {' '.join(full_cmd)}",
                 )
             except Exception:
                 continue

@@ -101,7 +101,7 @@ class RuntimeEventTuiListener:
                 type=ActivityType.ERROR,
                 state=ActivityState.FAILED,
                 title=f"Task failed: {title}",
-                detail=payload.get("error"),
+                detail=payload.get("error") or payload.get("failure_evidence"),
                 correlation_key=f"rtask_{event.task_id}" if event.task_id else None,
                 updates_activity=True,
             )
@@ -120,31 +120,70 @@ class RuntimeEventTuiListener:
         # --- Tool lifecycle ---
         if etype == EventType.TOOL_STARTED:
             tool = payload.get("tool", "tool")
+            args = payload.get("arguments", {})
+            path = payload.get("path") or (args.get("path") if isinstance(args, dict) else None)
+            command = payload.get("command") or payload.get("target")
+            if isinstance(args, dict):
+                command = command or args.get("command") or args.get("target")
+            tool_key = f"tool_{event.tool_call_id}" if event.tool_call_id else None
+
+            if tool in {"filesystem.read", "read_file"}:
+                return ActivityModel(
+                    type=ActivityType.READING,
+                    state=ActivityState.RUNNING,
+                    title=f"Reading {path or 'file'}",
+                    correlation_key=tool_key,
+                )
+            if tool in {"filesystem.write", "filesystem.replace", "write_to_file", "replace_file_content"}:
+                return ActivityModel(
+                    type=ActivityType.EDITING,
+                    state=ActivityState.RUNNING,
+                    title=f"Editing {path or 'file'}",
+                    correlation_key=tool_key,
+                )
+            if tool in {"shell.execute", "run_command", "testing.run", "diagnostics.lint"}:
+                label = command or ("tests" if tool == "testing.run" else "command")
+                kind = ActivityType.TEST if tool == "testing.run" else ActivityType.TOOL
+                return ActivityModel(
+                    type=kind,
+                    state=ActivityState.RUNNING,
+                    title=f"Running {_truncate(str(label), 60)}",
+                    correlation_key=tool_key,
+                )
             return ActivityModel(
                 type=ActivityType.TOOL,
                 state=ActivityState.RUNNING,
                 title=f"Running {tool}",
-                correlation_key=f"rtool_{event.tool_call_id}" if event.tool_call_id else None,
+                correlation_key=tool_key,
             )
 
         if etype == EventType.TOOL_COMPLETED:
             tool = payload.get("tool", "tool")
+            if tool in {
+                "filesystem.read", "filesystem.write", "filesystem.replace",
+                "filesystem.delete", "filesystem.list", "read_file", "write_to_file",
+                "replace_file_content", "delete_file", "list_dir", "shell.execute",
+                "run_command", "testing.run", "diagnostics.lint",
+            }:
+                return None
             return ActivityModel(
                 type=ActivityType.TOOL,
                 state=ActivityState.COMPLETED,
                 title=f"Completed {tool}",
-                correlation_key=f"rtool_{event.tool_call_id}" if event.tool_call_id else None,
+                correlation_key=f"tool_{event.tool_call_id}" if event.tool_call_id else None,
                 updates_activity=True,
             )
 
         if etype == EventType.TOOL_FAILED:
             tool = payload.get("tool", "tool")
+            if tool in {"shell.execute", "run_command", "testing.run", "diagnostics.lint"}:
+                return None
             return ActivityModel(
                 type=ActivityType.TOOL,
                 state=ActivityState.FAILED,
                 title=f"Failed {tool}",
                 detail=payload.get("error"),
-                correlation_key=f"rtool_{event.tool_call_id}" if event.tool_call_id else None,
+                correlation_key=f"tool_{event.tool_call_id}" if event.tool_call_id else None,
                 updates_activity=True,
             )
 
@@ -153,11 +192,11 @@ class RuntimeEventTuiListener:
             path = payload.get("path", "")
             name = _basename(path)
             return ActivityModel(
-                type=ActivityType.TOOL,
+                type=ActivityType.READING,
                 state=ActivityState.COMPLETED,
                 title=f"Read {name}",
                 detail=path,
-                correlation_key=f"rtool_{event.tool_call_id}" if event.tool_call_id else None,
+                correlation_key=f"tool_{event.tool_call_id}" if event.tool_call_id else None,
                 updates_activity=True,
             )
 
@@ -168,26 +207,26 @@ class RuntimeEventTuiListener:
             dels = payload.get("deletions")
             stats = _diff_stats(adds, dels)
             return ActivityModel(
-                type=ActivityType.TOOL,
+                type=ActivityType.EDITING,
                 state=ActivityState.COMPLETED,
                 title=f"Created {name}{stats}",
                 detail=path,
-                correlation_key=f"rtool_{event.tool_call_id}" if event.tool_call_id else None,
+                correlation_key=f"tool_{event.tool_call_id}" if event.tool_call_id else None,
                 updates_activity=True,
             )
 
-        if etype == EventType.FILE_EDITED:
+        if etype in {EventType.FILE_EDITED, EventType.FILE_MODIFIED}:
             path = payload.get("path", "")
             name = _basename(path)
             adds = payload.get("additions")
             dels = payload.get("deletions")
             stats = _diff_stats(adds, dels)
             return ActivityModel(
-                type=ActivityType.TOOL,
+                type=ActivityType.EDITING,
                 state=ActivityState.COMPLETED,
                 title=f"Edited {name}{stats}",
                 detail=path,
-                correlation_key=f"rtool_{event.tool_call_id}" if event.tool_call_id else None,
+                correlation_key=f"tool_{event.tool_call_id}" if event.tool_call_id else None,
                 updates_activity=True,
             )
 
@@ -199,7 +238,7 @@ class RuntimeEventTuiListener:
                 state=ActivityState.COMPLETED,
                 title=f"Deleted {name}",
                 detail=path,
-                correlation_key=f"rtool_{event.tool_call_id}" if event.tool_call_id else None,
+                correlation_key=f"tool_{event.tool_call_id}" if event.tool_call_id else None,
                 updates_activity=True,
             )
 
@@ -207,32 +246,34 @@ class RuntimeEventTuiListener:
         if etype == EventType.COMMAND_STARTED:
             cmd = payload.get("command", "command")
             return ActivityModel(
-                type=ActivityType.TOOL,
+                type=ActivityType.TEST if "pytest" in str(cmd).lower() else ActivityType.TOOL,
                 state=ActivityState.RUNNING,
                 title=f"Running {_truncate(cmd, 60)}",
-                correlation_key=f"rcmd_{event.tool_call_id}" if event.tool_call_id else None,
+                correlation_key=f"tool_{event.tool_call_id}" if event.tool_call_id else None,
             )
 
         if etype == EventType.COMMAND_COMPLETED:
             cmd = payload.get("command", "command")
+            output = payload.get("output")
             return ActivityModel(
-                type=ActivityType.TOOL,
+                type=ActivityType.TEST if "pytest" in str(cmd).lower() else ActivityType.TOOL,
                 state=ActivityState.COMPLETED,
                 title=f"Completed {_truncate(cmd, 60)}",
-                correlation_key=f"rcmd_{event.tool_call_id}" if event.tool_call_id else None,
+                detail=str(output)[:1200] if output else None,
+                correlation_key=f"tool_{event.tool_call_id}" if event.tool_call_id else None,
                 updates_activity=True,
             )
 
         if etype == EventType.COMMAND_FAILED:
             cmd = payload.get("command", "command")
             exit_code = payload.get("exit_code")
-            detail = f"exit code {exit_code}" if exit_code is not None else None
+            detail = payload.get("output") or (f"exit code {exit_code}" if exit_code is not None else None)
             return ActivityModel(
-                type=ActivityType.TOOL,
+                type=ActivityType.TEST if "pytest" in str(cmd).lower() else ActivityType.TOOL,
                 state=ActivityState.FAILED,
                 title=f"Failed {_truncate(cmd, 60)}",
                 detail=detail,
-                correlation_key=f"rcmd_{event.tool_call_id}" if event.tool_call_id else None,
+                correlation_key=f"tool_{event.tool_call_id}" if event.tool_call_id else None,
                 updates_activity=True,
             )
 
@@ -303,7 +344,7 @@ class RuntimeEventTuiListener:
                 type=ActivityType.ERROR,
                 state=ActivityState.FAILED,
                 title="Run failed",
-                detail=payload.get("error_message") or payload.get("error"),
+                detail=payload.get("error_message") or payload.get("error") or payload.get("reason"),
             )
 
         if etype == EventType.RUN_CANCELLED:

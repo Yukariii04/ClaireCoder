@@ -247,9 +247,38 @@ class GeminiAdapter(ProviderAdapterInterface):
             if role == "system":
                 system_parts.append(content if isinstance(content, str) else str(content))
             elif role == "assistant":
+                parts = []
+                if content:
+                    parts.append({"text": str(content)})
+                for call in msg.get("tool_calls", []) or []:
+                    function = call.get("function", {})
+                    raw_args = function.get("arguments", call.get("arguments", {}))
+                    if isinstance(raw_args, str):
+                        try:
+                            input_args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            input_args = {}
+                    else:
+                        input_args = raw_args if isinstance(raw_args, dict) else {}
+                    parts.append({
+                        "functionCall": {
+                            "name": function.get("name") or call.get("name", ""),
+                            "args": input_args,
+                        }
+                    })
                 contents.append({
                     "role": "model",
-                    "parts": [{"text": content}],
+                    "parts": parts or [{"text": ""}],
+                })
+            elif role == "tool":
+                contents.append({
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {
+                            "name": msg.get("name", ""),
+                            "response": {"content": str(content)},
+                        }
+                    }],
                 })
             else:
                 contents.append({

@@ -1603,3 +1603,44 @@
   - Complete workspace test suite: **1053 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_23_1.zip`.
 - **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning next phase.
+
+### 2026-10-04 — CLI / TUI Stage 7: Correction #24 (Agent Tool Execution Workflow)
+- **Status**: IMPLEMENTED; tests not run for this request.
+- **Problem Found**:
+  - The application passed direct-execution tools into a permission executor and model loop that require metadata-bearing, permission-aware tools. Tool schema construction failed before the model could call file tools.
+  - Permission events exposed the tool-call ID instead of the executor's pending permission ID, and the engine emitted resolution events without executing the stored invocation.
+  - The model received no explicit implementation instructions; plain text was accepted as successful implementation even when it changed no files.
+- **Changes**:
+  - Wired the application to permission-aware workspace file, search, terminal, test, and diagnostic tools, rooted at the active project.
+  - Advertised provider-safe function names and preserved provider tool-call IDs/results across OpenAI-compatible, Anthropic, Gemini, and Ollama requests.
+  - Added an implementation-focused task prompt and made prose-only implementation responses fail instead of reporting false success; increased the interaction budget to 12 turns.
+  - Connected permission request IDs to pending invocations, execute approved tools, wait for the result, and return it to the model loop.
+  - Added permission prompts for direct CLI runs with a TTY and fast, actionable failure for headless runs without an approval surface.
+- **Verification**: Not run; the user requested diagnosis and a fix, not test execution.
+- **Artifact Generated**: `Phase_CLI_TUI_Stage_7_Correction_24.zip`.
+- **Next Step**: User review.
+
+### 2026-10-04 — CLI / TUI Stage 7: Correction #24.1 (Coding Workflow & TUI Recovery)
+- **Status**: IMPLEMENTED; tests not run.
+- **Diagnosis**:
+  - The interactive TUI was disconnected from the semantic runtime event stream, so real file and command activities were not rendered while placeholder controller messages remained visible.
+  - Short coding objectives went through the structured planner, where small local models could add unrelated tasks and verification criteria. Reused sessions retained tasks from earlier objectives.
+  - The default permission mode asked before workspace reads; “always this session” grants were resource-specific; and the Windows terminal ran through `cmd.exe` without platform-specific shell instructions.
+  - A local model that answered with code but made no tool call left the workspace unchanged.
+- **Changes**:
+  - Connected TUI rendering to runtime read, edit, command, diff, verification, changeset, and failure events; removed the “Objective accepted” transcript filler and preserved recent activity during permission prompts.
+  - Made workspace reads automatic in assisted mode while keeping writes and command execution permission-gated; session-wide grants now apply to later files/commands for that tool/action/category.
+  - Switched Windows shell execution to PowerShell and supplied OS/shell context to the model.
+  - Made the test runner PowerShell-compatible on Windows and confined lint paths while invoking diagnostics without shell interpolation under the correct execution permission.
+  - Added direct planning for short requests, removed stale tasks from other objectives in reused sessions, and enabled a permission-aware fallback for one fenced code block when a model cannot call tools. The fallback only creates a new workspace path and does not overwrite existing files.
+  - Prevented implementation narration and file-write receipts from being reused as invented verification criteria.
+  - Kept file diffs and successful/failed command output in the TUI activity stream.
+- **Files Modified**:
+  - `src/clairecoder/app.py`, `src/clairecoder/cli/main.py`, `src/clairecoder/engine/engine.py`
+  - `src/clairecoder/runtime/agent_runtime.py`, `src/clairecoder/runtime/bridge.py`, `src/clairecoder/runtime/tui_listener.py`
+  - `src/clairecoder/tools/core/__init__.py`, `src/clairecoder/tools/executor.py`
+  - `src/clairecoder/tui/activity.py`, `src/clairecoder/tui/activity_mapper.py`, `src/clairecoder/tui/app.py`
+  - `memory.md`, `update.md`
+- **Verification**: Not run; this correction has not been validated by executing tests.
+- **Artifact**: `Phase_CLI_TUI_Stage_7_Correction_24_1.zip`.
+- **Next Step**: User review.

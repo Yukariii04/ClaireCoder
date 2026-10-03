@@ -1,3 +1,4 @@
+from threading import Condition
 from typing import Any, Dict, Optional
 from clairecoder.core.types import PermissionState, ToolResult, ToolState
 from clairecoder.permissions.engine import PermissionEngine
@@ -27,6 +28,8 @@ class ToolExecutor:
         self._mode_policy: Optional[ModePolicy] = None
         # §4: Pending permission invocations
         self._pending_permissions: Dict[str, PendingToolInvocation] = {}
+        self._permission_condition = Condition()
+        self._resolved_permissions: Dict[str, ToolResult] = {}
 
     def set_mode_policy(self, policy: Any) -> None:
         """Set the active mode policy for tool execution.
@@ -126,7 +129,8 @@ class ToolExecutor:
                     resource=resource_desc,
                     category=category.value if category else None,
                 )
-                self._pending_permissions[request_id] = pending
+                with self._permission_condition:
+                    self._pending_permissions[request_id] = pending
 
                 return ToolResult(
                     state=ToolState.DENIED,
@@ -151,67 +155,97 @@ class ToolExecutor:
 
         §4 — Approval executes the exact pending invocation.
         """
-        pending = self._pending_permissions.pop(request_id, None)
+        with self._permission_condition:
+            pending = self._pending_permissions.pop(request_id, None)
 
         if pending is None:
-            return ToolResult(
+            result = ToolResult(
                 state=ToolState.FAILURE,
                 output=None,
                 error=f"Unknown permission request: {request_id}",
             )
+        else:
+            decision = decision.lower()
 
-        decision = decision.lower()
-
-        if decision in ("granted", "approve", "yes", "y"):
-            return self._execute_pending(pending)
-
-        if decision in ("always", "always_session"):
-            # §4: persist the session-scoped rule, then execute
-            if pending.session_id:
-                category = PermissionCategory(pending.category) if pending.category else None
-                self._permission_engine.grant_session_permission(
-                    session_id=pending.session_id,
-                    tool_id=pending.tool_id,
-                    operation=pending.action,
-                    resource=pending.resource,
-                    category=category,
+            if decision in ("granted", "approve", "yes", "y"):
+                result = self._execute_pending(pending)
+            elif decision in ("always", "always_session"):
+                # "Always this session" means this tool/action/category for the
+                # rest of this session. Keeping the original resource here made
+                # the grant apply only to one exact command or file, so every
+                # later operation prompted again.
+                if pending.session_id:
+                    category = PermissionCategory(pending.category) if pending.category else None
+                    self._permission_engine.grant_session_permission(
+                        session_id=pending.session_id,
+                        tool_id=pending.tool_id,
+                        operation=pending.action,
+                        resource=None,
+                        category=category,
+                    )
+                result = self._execute_pending(pending)
+            elif decision in ("denied", "deny", "no", "n"):
+                result = ToolResult(
+                    state=ToolState.DENIED,
+                    output=None,
+                    error="User denied tool execution",
                 )
-            return self._execute_pending(pending)
+            elif decision in ("cancelled", "cancel", "escape", "esc"):
+                result = ToolResult(
+                    state=ToolState.CANCELLED,
+                    output=None,
+                    error="User cancelled tool execution",
+                )
+            else:
+                result = ToolResult(
+                    state=ToolState.FAILURE,
+                    output=None,
+                    error=f"Unknown permission decision: {decision}",
+                )
 
-        if decision in ("denied", "deny", "no", "n"):
-            return ToolResult(
-                state=ToolState.DENIED,
-                output=None,
-                error="User denied tool execution",
+        with self._permission_condition:
+            self._resolved_permissions[request_id] = result
+            self._permission_condition.notify_all()
+        return result
+
+    def wait_for_permission(
+        self,
+        request_id: str,
+        timeout: Optional[float] = None,
+    ) -> Optional[ToolResult]:
+        """Wait for a user decision, including decisions made before this call."""
+        with self._permission_condition:
+            ready = self._permission_condition.wait_for(
+                lambda: request_id in self._resolved_permissions,
+                timeout=timeout,
             )
+            if not ready:
+                return None
+            return self._resolved_permissions.pop(request_id)
 
-        if decision in ("cancelled", "cancel", "escape", "esc"):
-            return ToolResult(
-                state=ToolState.CANCELLED,
-                output=None,
-                error="User cancelled tool execution",
-            )
-
-        return ToolResult(
-            state=ToolState.FAILURE,
-            output=None,
-            error=f"Unknown permission decision: {decision}",
-        )
+    def expire_permission(self, request_id: str) -> None:
+        """Discard an unanswered request after the interaction timeout."""
+        with self._permission_condition:
+            self._pending_permissions.pop(request_id, None)
 
     def cleanup_pending(self) -> None:
         """Clean up all pending permission entries.
 
         §4 — Called on run completion, failure, cancellation, Ctrl+C.
         """
-        self._pending_permissions.clear()
+        with self._permission_condition:
+            self._pending_permissions.clear()
+            self._resolved_permissions.clear()
 
     def get_pending(self, request_id: str) -> Optional[PendingToolInvocation]:
         """Get a pending invocation by request_id."""
-        return self._pending_permissions.get(request_id)
+        with self._permission_condition:
+            return self._pending_permissions.get(request_id)
 
     def has_pending(self) -> bool:
         """Check if there are any pending permission requests."""
-        return bool(self._pending_permissions)
+        with self._permission_condition:
+            return bool(self._pending_permissions)
 
     def _execute_pending(self, pending: PendingToolInvocation) -> ToolResult:
         """Execute a pending tool invocation exactly as originally requested."""

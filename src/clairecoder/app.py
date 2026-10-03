@@ -20,7 +20,21 @@ from clairecoder.gateway.config import ProviderProfile, AdapterType, PROVIDER_RE
 from clairecoder.gateway.credentials import CredentialStore
 from clairecoder.gateway.manager import ConfigurationManager
 from clairecoder.tools.executor import ToolExecutor
+from clairecoder.tools.registry import ToolRegistry
+from clairecoder.tools.core import (
+    ReadFileTool as PermissionedReadFileTool,
+    WriteFileTool as PermissionedWriteFileTool,
+    ReplaceFileContentTool,
+    ListDirTool,
+    DeleteFileTool as PermissionedDeleteFileTool,
+    SearchTool,
+    TerminalTool,
+    RunTestsTool,
+    DiagnosticsTool,
+    set_workspace_root,
+)
 from clairecoder.permissions.engine import PermissionEngine
+from clairecoder.permissions.types import AutonomyLevel
 from clairecoder.skills.registry import SkillRegistry
 from clairecoder.workflow.manager import WorkflowManager
 from clairecoder.workflow.planner import Planner
@@ -56,12 +70,35 @@ class ClaireCoderV1:
         session_store: Optional[SessionStore] = None,
     ):
         from clairecoder.gateway.gateway import ModelGateway
-        from clairecoder.tools.registry import ToolRegistry
         from clairecoder.verification.runner import DefaultVerificationRunner
 
         self.model_gateway = model_gateway if model_gateway is not None else ModelGateway()
-        self.permission_engine = permission_engine if permission_engine is not None else PermissionEngine()
-        self.tool_executor = tool_executor if tool_executor is not None else ToolExecutor(ToolRegistry.create_default(), self.permission_engine)
+        # Coding sessions need to inspect the workspace without stopping for
+        # approval on every read. Writes and command execution remain gated.
+        self.permission_engine = permission_engine if permission_engine is not None else PermissionEngine(
+            autonomy_level=AutonomyLevel.ASSISTED
+        )
+        self._workspace_root = str(Path(workspace_root or Path.cwd()).resolve())
+        set_workspace_root(self._workspace_root)
+        if tool_executor is not None:
+            self.tool_executor = tool_executor
+        else:
+            # The Engine/ToolExecutor boundary uses permission-aware tools from
+            # tools.core. ToolRegistry.create_default() contains the separate
+            # direct-execution tools used by AgentRuntime and cannot satisfy
+            # ToolExecutor's metadata/permission contract.
+            engine_tool_registry = ToolRegistry(tools=[
+                PermissionedReadFileTool(),
+                PermissionedWriteFileTool(),
+                ReplaceFileContentTool(),
+                ListDirTool(),
+                PermissionedDeleteFileTool(),
+                SearchTool(),
+                TerminalTool(),
+                RunTestsTool(),
+                DiagnosticsTool(),
+            ])
+            self.tool_executor = ToolExecutor(engine_tool_registry, self.permission_engine)
         self.skill_registry = skill_registry if skill_registry is not None else SkillRegistry()
         self.workflow_manager = workflow_manager if workflow_manager is not None else WorkflowManager()
         self.execution_manager = execution_manager if execution_manager is not None else ExecutionManager()
@@ -70,7 +107,6 @@ class ClaireCoderV1:
             self.verification_engine._runner = DefaultVerificationRunner(workspace_root=workspace_root)
         
         # Configuration management (Stage 7)
-        self._workspace_root = workspace_root
         self.config_manager = ConfigurationManager(workspace_root=workspace_root)
         
         # Core engineering orchestrator

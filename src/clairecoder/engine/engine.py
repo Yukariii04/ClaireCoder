@@ -1,4 +1,6 @@
 import json
+import re
+import platform
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 from .types import EngineeringObjective, Task, TaskState, ObjectiveStatus, EngineEvent
@@ -9,6 +11,81 @@ from clairecoder.core.types import ToolResult, ToolState, PermissionState
 from clairecoder.context.builder import ContextBuilder
 from clairecoder.context.types import EngineeringContext
 from clairecoder.skills.registry import SkillRegistry
+
+
+_MODEL_TOOL_NAMES = {
+    "filesystem.read": "read_file",
+    "filesystem.write": "write_file",
+    "filesystem.replace": "replace_file_content",
+    "filesystem.list": "list_files",
+    "filesystem.delete": "delete_file",
+    "search.text": "search_text",
+    "shell.execute": "run_command",
+    "git.status": "git_status",
+    "git.commit": "git_commit",
+    "testing.run": "run_tests",
+    "diagnostics.lint": "run_diagnostics",
+}
+
+
+def _model_tool_name(tool_id: str) -> str:
+    """Return a provider-safe function name while preserving the registry ID."""
+    known_name = _MODEL_TOOL_NAMES.get(tool_id)
+    if known_name:
+        return known_name
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id)[:64] or "tool"
+
+
+def _extract_single_code_block(text: str) -> Optional[str]:
+    """Return one complete fenced code block, avoiding guesses from prose."""
+    blocks = re.findall(r"```[^\r\n]*\r?\n(.*?)```", text or "", flags=re.DOTALL)
+    if len(blocks) != 1:
+        return None
+    content = blocks[0].strip("\r\n")
+    return content if content.strip() else None
+
+
+def _infer_new_code_path(objective: str, expected_outputs: List[str]) -> Optional[str]:
+    """Resolve a safe requested filename or choose one for a simple code task."""
+    path_pattern = re.compile(r"(?:[A-Za-z0-9_.-]+[/\\])*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}")
+    for source in [*expected_outputs, objective]:
+        for match in path_pattern.findall(str(source or "")):
+            normalized = match.replace("\\", "/")
+            path = Path(normalized)
+            if not path.is_absolute() and all(part not in (".", "..") for part in path.parts):
+                return path.as_posix()
+
+    text = (objective or "").lower()
+    if not re.search(r"\b(write|create|generate|make)\b", text) or not re.search(r"\b(code|program|script)\b", text):
+        return None
+
+    extensions = {
+        "python": "py", "javascript": "js", "typescript": "ts", "java": "java",
+        "rust": "rs", "golang": "go", "go": "go", "ruby": "rb", "php": "php",
+        "c++": "cpp", "c#": "cs", "kotlin": "kt", "swift": "swift",
+    }
+    extension = next(
+        (
+            ext for language, ext in extensions.items()
+            if re.search(
+                rf"(?<![a-z0-9]){re.escape(language)}(?![a-z0-9])",
+                text,
+            )
+        ),
+        None,
+    )
+    if not extension:
+        return None
+
+    ignored = {
+        "write", "create", "generate", "make", "code", "program", "script", "function",
+        "class", "file", "for", "in", "using", "with", "a", "an", "the", "to",
+        *extensions.keys(),
+    }
+    words = re.findall(r"[a-z0-9]+", text)
+    stem_words = [word for word in words if word not in ignored]
+    stem = "-".join(stem_words[:3]) or "main"
+    return f"{stem}.{extension}"
 
 class EngineeringSession:
     """Represents the persistent state of an engineering task."""
@@ -194,6 +271,7 @@ class EngineeringEngine:
         self._tool_executor = tool_executor
         self._skill_registry = skill_registry
         self._event_subscribers: List[Callable[[EngineEvent, Dict[str, Any]], None]] = []
+        self.permission_wait_timeout_seconds = 300.0
         if event_callback:
             self._event_subscribers.append(event_callback)
         self._sessions: Dict[str, EngineeringSession] = {}
@@ -370,12 +448,23 @@ class EngineeringEngine:
     def request_tool(
         self, tool_id: str, session_id: Optional[str] = None, 
         workflow_id: Optional[str] = None, task_id: Optional[str] = None, 
+        tool_call_id: Optional[str] = None,
         **kwargs
     ) -> ToolResult:
         """Coordinate ToolExecutor invocation with correct context propagation."""
         import uuid
-        request_id = str(uuid.uuid4())
-        self._emit(EngineEvent.TOOL_REQUESTED, {"tool_id": tool_id, "tool_name": tool_id, "request_id": request_id})
+        request_id = tool_call_id or str(uuid.uuid4())
+        self._emit(EngineEvent.TOOL_REQUESTED, {
+            "tool_id": tool_id,
+            "tool_name": tool_id,
+            "request_id": request_id,
+            "tool_call_id": request_id,
+            # Expose only safe operation targets for live TUI activity labels;
+            # never copy file contents or arbitrary argument payloads here.
+            "path": kwargs.get("path"),
+            "command": kwargs.get("command"),
+            "target": kwargs.get("target"),
+        })
         
         # We forward the context to the ToolExecutor boundary (which passes it to PermissionEngine)
         result = self._tool_executor.invoke(
@@ -383,14 +472,17 @@ class EngineeringEngine:
             session_id=session_id, 
             workflow_id=workflow_id, 
             task_id=task_id, 
+            tool_call_id=request_id,
             **kwargs
         )
         
         if result.state == ToolState.DENIED and result.metadata.get("requires_confirmation"):
+            permission_request_id = result.metadata.get("request_id", request_id)
             self._emit(EngineEvent.PERMISSION_REQUESTED, {
                 "tool_id": tool_id, 
                 "tool_name": tool_id,
-                "request_id": request_id,
+                "request_id": permission_request_id,
+                "tool_call_id": request_id,
                 "action": result.metadata.get("action"), 
                 "resource": result.metadata.get("resource"),
                 "command": result.metadata.get("command"),
@@ -400,10 +492,16 @@ class EngineeringEngine:
                 "metadata": result.metadata
             })
             
+        completion_request_id = (
+            result.metadata.get("request_id", request_id)
+            if result.metadata.get("requires_confirmation")
+            else request_id
+        )
         self._emit(EngineEvent.TOOL_COMPLETED, {
             "tool_id": tool_id, 
             "tool_name": tool_id,
-            "request_id": request_id, 
+            "request_id": completion_request_id,
+            "tool_call_id": request_id,
             "session_id": session_id,
             "action": result.metadata.get("action"),
             "resource": result.metadata.get("resource"),
@@ -448,66 +546,41 @@ class EngineeringEngine:
         resource: Optional[str] = None,
         command: Optional[str] = None,
         category: Optional[str] = None
-    ) -> None:
-        """Public method to resolve a pending permission confirmation and emit the event."""
+    ) -> ToolResult:
+        """Resolve a permission and execute its stored invocation when approved."""
         norm_decision = str(decision).lower()
-        if norm_decision in ("always", "always_session"):
-            if session_id:
-                self.grant_session_permission(
-                    session_id=session_id,
-                    tool_id=tool_id,
-                    operation=action,
-                    resource=resource,
-                    category=category
-                )
-            self._emit(EngineEvent.PERMISSION_RESOLVED, {
-                "request_id": request_id,
-                "decision": "granted",
-                "scope": "session",
-                "session_id": session_id,
-                "tool_id": tool_id,
-                "tool_name": tool_id,
-                "action": action,
-                "resource": resource,
-                "command": command
+        permission_tool = self._tool_executor.get_pending(request_id)
+        result = self._tool_executor.resolve_permission(request_id, norm_decision)
+
+        resolved_decision = "granted" if norm_decision in (
+            "always", "always_session", "approve", "granted", "yes", "y"
+        ) else "denied" if norm_decision in ("deny", "denied", "no", "n") else "cancelled"
+        event_data = {
+            "request_id": request_id,
+            "decision": resolved_decision,
+            "scope": "session" if norm_decision in ("always", "always_session") else "once",
+            "session_id": session_id or getattr(permission_tool, "session_id", None),
+            "tool_id": tool_id or getattr(permission_tool, "tool_id", None),
+            "tool_name": tool_id or getattr(permission_tool, "tool_id", None),
+            "task_id": getattr(permission_tool, "task_id", None),
+            "tool_call_id": getattr(permission_tool, "tool_call_id", None),
+            "action": action or getattr(permission_tool, "action", None),
+            "resource": resource or getattr(permission_tool, "resource", None),
+            "command": command,
+        }
+        if permission_tool is not None:
+            self._emit(EngineEvent.TOOL_COMPLETED, {
+                **event_data,
+                "request_id": getattr(permission_tool, "tool_call_id", None) or request_id,
+                "state": result.state,
+                "result": result.output if result.state == ToolState.SUCCESS else result.error,
+                "metadata": result.metadata,
             })
-        elif norm_decision in ("approve", "granted", "yes", "y"):
-            self._emit(EngineEvent.PERMISSION_RESOLVED, {
-                "request_id": request_id,
-                "decision": "granted",
-                "scope": "once",
-                "session_id": session_id,
-                "tool_id": tool_id,
-                "tool_name": tool_id,
-                "action": action,
-                "resource": resource,
-                "command": command
-            })
-        elif norm_decision in ("deny", "denied", "no", "n"):
-            self._emit(EngineEvent.PERMISSION_RESOLVED, {
-                "request_id": request_id,
-                "decision": "denied",
-                "session_id": session_id,
-                "tool_id": tool_id,
-                "tool_name": tool_id,
-                "action": action,
-                "resource": resource,
-                "command": command
-            })
-        elif norm_decision in ("cancel", "cancelled", "escape", "esc"):
-            self._emit(EngineEvent.PERMISSION_RESOLVED, {
-                "request_id": request_id,
-                "decision": "cancelled",
-                "session_id": session_id,
-                "tool_id": tool_id,
-                "tool_name": tool_id,
-                "action": action,
-                "resource": resource,
-                "command": command
-            })
+        self._emit(EngineEvent.PERMISSION_RESOLVED, event_data)
+        return result
 
 
-    def interaction_loop(self, session_id: str, task_id: str, max_iterations: int = 5) -> "ExecutionResult":
+    def interaction_loop(self, session_id: str, task_id: str, max_iterations: int = 12) -> "ExecutionResult":
         """A complete Phase 7 Model Interaction Loop (Model -> Tool -> Result -> Model).
         
         Tool results must not be discarded. They are fed back into the next model request.
@@ -525,14 +598,62 @@ class EngineeringEngine:
         task = session.tasks[task_id]
         
         # Maintain execution history within the loop
-        interaction_history = [
-            {"role": "user", "content": f"Task: {task.description}"}
-        ]
+        task_type = getattr(task.type, "value", str(task.type))
+        objective_text = session.objective.request if session.objective else task.description
+        task_brief = (
+            f"Overall objective: {objective_text}\n"
+            f"Task title: {task.title or task.id}\n"
+            f"Task type: {task_type}\n"
+            f"Task: {task.description}\n"
+            f"Expected outputs: {task.expected_outputs}\n"
+            f"Validation requirements: {task.validation or task.validation_requirements}"
+        )
+        implementation_task = task_type in {"implementation", "refactor", "documentation"}
+        workspace_root = None
+        try:
+            from clairecoder.tools.core import get_workspace_root
+            workspace_root = str(get_workspace_root())
+        except Exception:
+            pass
+        platform_name = platform.system() or "unknown"
+        shell_name = "Windows PowerShell" if platform_name == "Windows" else "POSIX shell"
+        system_prompt = (
+            "You are ClaireCoder, the engineering agent working inside the user's project workspace. "
+            "Use the available tools to inspect files and carry out the task. Keep all file changes "
+            f"inside the workspace ({workspace_root or 'the configured project directory'}). "
+            f"The execution platform is {platform_name}; shell commands use {shell_name} syntax. "
+            "Use filesystem tools to inspect files and the provided workspace context instead of "
+            "running shell commands just to discover the current directory. Tool results, including "
+            "permission decisions, are authoritative. "
+            "Do not claim that a file changed unless a file tool reports success.\n\n"
+        )
+        if implementation_task:
+            system_prompt += (
+                "This is an implementation task. Read the relevant project files, make the requested "
+                "code or documentation changes with the file tools, then run relevant checks with the "
+                "available command tools. If the request does not name a file, choose a clear conventional "
+                "file name in the workspace. Call the file tools; a prose proposal alone does not complete "
+                "the task."
+            )
+        else:
+            system_prompt += (
+                "This task is not classified as implementation. Inspect and report as requested; "
+                "do not edit files unless the task explicitly requires it."
+            )
+        interaction_history = [{"role": "user", "content": task_brief}]
+        successful_mutation = False
+        tool_operation_blocked = False
+        no_tool_response_retries = 0
         
         # Build tool definitions from available tools in registry
         tools_decl = []
+        tool_name_to_id: Dict[str, str] = {}
         if self._tool_executor and hasattr(self._tool_executor, "_registry") and self._tool_executor._registry:
             for tool in self._tool_executor._registry.list_available():
+                registry_id = tool.metadata.id
+                model_name = _model_tool_name(registry_id)
+                tool_name_to_id[model_name] = registry_id
+                tool_name_to_id[registry_id] = registry_id
                 props = {}
                 req_fields = []
                 for k, v in tool.metadata.input_schema.items():
@@ -545,7 +666,7 @@ class EngineeringEngine:
                 tools_decl.append({
                     "type": "function",
                     "function": {
-                        "name": tool.metadata.id,
+                        "name": model_name,
                         "description": tool.metadata.description,
                         "parameters": {
                             "type": "object",
@@ -554,21 +675,6 @@ class EngineeringEngine:
                         }
                     }
                 })
-                # Add aliases
-                for alias, canonical in getattr(self._tool_executor._registry, "ALIASES", {}).items():
-                    if canonical == tool.metadata.id and alias != tool.metadata.id:
-                        tools_decl.append({
-                            "type": "function",
-                            "function": {
-                                "name": alias,
-                                "description": tool.metadata.description,
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": props,
-                                    "required": req_fields,
-                                }
-                            }
-                        })
 
         model_id = session.model_profile or getattr(session.objective, "model_profile_id", None)
         if not model_id:
@@ -595,7 +701,7 @@ class EngineeringEngine:
             
             # Combine assembled context with the interaction history
             messages = [
-                {"role": "system", "content": f"Context: {context.session_info}\nSkills: {context.instructions}"}
+                {"role": "system", "content": f"{system_prompt}\n\nContext: {context.session_info}\nSkills: {context.instructions}"}
             ] + interaction_history
             
             request = ModelRequest(
@@ -605,17 +711,25 @@ class EngineeringEngine:
             )
             response = self.execute_model(request)
             
-            # Record model's response in history
-            if response.text:
-                interaction_history.append({"role": "assistant", "content": response.text})
-            
             if response.tool_calls:
-                # Add tool_calls array to the interaction history
-                interaction_history.append({"role": "assistant", "tool_calls": response.tool_calls})
+                # Keep assistant content and tool calls in one message. This is
+                # required by OpenAI-compatible tool-call history formats.
+                import uuid
+                normalized_calls = []
+                for tc in response.tool_calls:
+                    call = dict(tc) if isinstance(tc, dict) else {"name": str(tc), "arguments": {}}
+                    if not call.get("id"):
+                        call["id"] = str(uuid.uuid4())
+                    normalized_calls.append(call)
+                interaction_history.append({
+                    "role": "assistant",
+                    "content": response.text or "",
+                    "tool_calls": normalized_calls,
+                })
                 
                 tool_results_for_history = []
                 
-                for tc in response.tool_calls:
+                for tc in normalized_calls:
                     # Check cancellation before each tool call
                     if session.objective and session.objective.status in (ObjectiveStatus.PAUSED, ObjectiveStatus.CANCELLED, ObjectiveStatus.FAILED):
                         return ExecutionResult(
@@ -626,7 +740,7 @@ class EngineeringEngine:
 
                     if isinstance(tc, dict):
                         fn = tc.get("function", {})
-                        tool_name = tc.get("name") or fn.get("name")
+                        model_tool_name = tc.get("name") or fn.get("name")
                         raw_args = tc.get("arguments") or fn.get("arguments")
                         if isinstance(raw_args, str):
                             try:
@@ -638,22 +752,61 @@ class EngineeringEngine:
                         else:
                             kwargs_dict = {}
                     else:
-                        tool_name = str(tc)
+                        model_tool_name = str(tc)
                         kwargs_dict = {}
 
+                    tool_name = tool_name_to_id.get(model_tool_name, model_tool_name)
+                    tool_call_id = tc.get("id") or tc.get("tool_call_id")
                     tool_res = self.request_tool(
                         tool_id=tool_name,
                         session_id=session_id,
                         workflow_id=session.current_workflow,
                         task_id=task_id,
+                        tool_call_id=tool_call_id,
                         **kwargs_dict
                     )
+
+                    if tool_res.state == ToolState.DENIED and tool_res.metadata.get("requires_confirmation"):
+                        permission_request_id = tool_res.metadata.get("request_id")
+                        wait_for_permission = getattr(self._tool_executor, "wait_for_permission", None)
+                        if permission_request_id and callable(wait_for_permission):
+                            resolved_result = wait_for_permission(
+                                permission_request_id,
+                                timeout=self.permission_wait_timeout_seconds,
+                            )
+                            if resolved_result is None:
+                                expire_permission = getattr(self._tool_executor, "expire_permission", None)
+                                if callable(expire_permission):
+                                    expire_permission(permission_request_id)
+                                return ExecutionResult(
+                                    category=ExecutionResultCategory.FAILURE,
+                                    failure_category=FailureCategory.TIMEOUT,
+                                    error_message=(
+                                        "No permission decision was received for a requested tool. "
+                                        "Run ClaireCoder in an interactive terminal to approve file and command actions."
+                                    ),
+                                    task_id=task_id,
+                                )
+                            tool_res = resolved_result
+
+                    if tool_res.state == ToolState.SUCCESS:
+                        try:
+                            resolved_tool = self._tool_executor._registry.resolve(tool_name)
+                            successful_mutation = successful_mutation or any(
+                                req.action in {"write", "create", "delete", "modify_repository"}
+                                for req in getattr(resolved_tool, "required_permissions", [])
+                            )
+                        except Exception:
+                            pass
+                    elif tool_res.state in {ToolState.DENIED, ToolState.CANCELLED}:
+                        tool_operation_blocked = True
                     
                     # Store tool result for the next iteration model continuation
                     content_str = str(tool_res.output) if tool_res.state == ToolState.SUCCESS else str(tool_res.error)
                     tool_results_for_history.append({
                         "role": "tool",
-                        "name": tool_name,
+                        "name": model_tool_name,
+                        "tool_call_id": tool_call_id,
                         "content": content_str
                     })
                     
@@ -662,8 +815,125 @@ class EngineeringEngine:
             else:
                 # No tools requested, model considers task done
                 last_text = response.text or ""
-                task.expected_result = last_text
-                return ExecutionResult(category=ExecutionResultCategory.SUCCESS, tool_result=last_text)
+                if implementation_task and not successful_mutation:
+                    if no_tool_response_retries < 1:
+                        no_tool_response_retries += 1
+                        interaction_history.append({"role": "assistant", "content": last_text})
+                        interaction_history.append({
+                            "role": "user",
+                            "content": (
+                                "The project has not been changed yet. Continue the implementation now by "
+                                "calling the available filesystem tools. Read relevant files first, then "
+                                "create or edit the requested file. Do not answer with a proposal or code "
+                                "in chat. After a successful file change, run an appropriate check."
+                            ),
+                        })
+                        continue
+                    fallback_code = _extract_single_code_block(last_text)
+                    fallback_path = _infer_new_code_path(
+                        objective_text,
+                        task.expected_outputs or [],
+                    )
+                    if fallback_code and fallback_path and self._tool_executor and not tool_operation_blocked:
+                        try:
+                            from clairecoder.tools.core import get_workspace_root
+                            from clairecoder.tools.workspace import resolve_workspace_path
+
+                            target_path = resolve_workspace_path(
+                                get_workspace_root(),
+                                fallback_path,
+                            )
+                        except Exception as exc:
+                            return ExecutionResult(
+                                category=ExecutionResultCategory.FAILURE,
+                                failure_category=FailureCategory.UNKNOWN_FAILURE,
+                                error_message=f"Could not resolve the proposed file inside the workspace: {exc}",
+                                tool_result=last_text,
+                                task_id=task_id,
+                            )
+
+                        if target_path.exists():
+                            return ExecutionResult(
+                                category=ExecutionResultCategory.FAILURE,
+                                failure_category=FailureCategory.UNKNOWN_FAILURE,
+                                error_message=(
+                                    f"The model returned code but did not use file tools; "
+                                    f"{fallback_path} already exists, so it was left unchanged."
+                                ),
+                                tool_result=last_text,
+                                task_id=task_id,
+                            )
+
+                        tool_res = self.request_tool(
+                            "filesystem.write",
+                            session_id=session_id,
+                            workflow_id=session.current_workflow,
+                            task_id=task_id,
+                            path=fallback_path,
+                            content=fallback_code,
+                        )
+                        if tool_res.state == ToolState.DENIED and tool_res.metadata.get("requires_confirmation"):
+                            permission_request_id = tool_res.metadata.get("request_id")
+                            wait_for_permission = getattr(self._tool_executor, "wait_for_permission", None)
+                            if permission_request_id and callable(wait_for_permission):
+                                resolved_result = wait_for_permission(
+                                    permission_request_id,
+                                    timeout=self.permission_wait_timeout_seconds,
+                                )
+                                if resolved_result is None:
+                                    expire_permission = getattr(self._tool_executor, "expire_permission", None)
+                                    if callable(expire_permission):
+                                        expire_permission(permission_request_id)
+                                    return ExecutionResult(
+                                        category=ExecutionResultCategory.FAILURE,
+                                        failure_category=FailureCategory.TIMEOUT,
+                                        error_message=(
+                                            "No permission decision was received for the proposed file write. "
+                                            "Run ClaireCoder in an interactive terminal to approve file changes."
+                                        ),
+                                        task_id=task_id,
+                                    )
+                                tool_res = resolved_result
+
+                        if tool_res.state == ToolState.SUCCESS:
+                            return ExecutionResult(
+                                category=ExecutionResultCategory.SUCCESS,
+                                tool_result=str(tool_res.output or f"Created {fallback_path}"),
+                                task_id=task_id,
+                            )
+
+                        return ExecutionResult(
+                            category=ExecutionResultCategory.FAILURE,
+                            failure_category=FailureCategory.UNKNOWN_FAILURE,
+                            error_message=(
+                                f"Could not create {fallback_path} from the model's code response: "
+                                f"{tool_res.error or tool_res.state.value}."
+                            ),
+                            tool_result=last_text,
+                            task_id=task_id,
+                        )
+                    return ExecutionResult(
+                        category=ExecutionResultCategory.FAILURE,
+                        failure_category=FailureCategory.UNKNOWN_FAILURE,
+                        error_message=(
+                            "Implementation was not applied: "
+                            + (
+                                "a requested tool operation was denied or blocked, so no additional write was attempted."
+                                if tool_operation_blocked
+                                else "the model did not make a successful file change after being asked to use workspace tools. "
+                                "Confirm that this model supports tool calling or provide a concrete file path."
+                            )
+                        ),
+                        tool_result=last_text,
+                        task_id=task_id,
+                    )
+                if not implementation_task and not task.expected_result:
+                    task.expected_result = last_text
+                return ExecutionResult(
+                    category=ExecutionResultCategory.SUCCESS,
+                    tool_result=last_text,
+                    task_id=task_id,
+                )
                 
         return ExecutionResult(
             category=ExecutionResultCategory.TIMEOUT,
@@ -682,6 +952,16 @@ class EngineeringEngine:
             raise ValueError(f"Session {session_id} not found")
             
         self._emit(EngineEvent.PLANNING_STARTED, {"session_id": session_id})
+        # A session can host several objectives. Keep prior tasks only while
+        # replanning the same objective; otherwise stale failures from an older
+        # prompt leak into the next run's final status and verification summary.
+        current_objective_id = session.objective.id if session.objective else None
+        if current_objective_id:
+            session.tasks = {
+                task_id: task
+                for task_id, task in session.tasks.items()
+                if task.objective_id == current_objective_id
+            }
         for task in tasks:
             session.update_task(task)
         self._emit(EngineEvent.PLANNING_COMPLETED, {"session_id": session_id, "tasks": [t.id for t in tasks]})

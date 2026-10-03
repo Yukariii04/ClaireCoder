@@ -161,6 +161,7 @@ class ActivityEvent:
     change_summary: Optional[ExecutionChangeSummary] = None
     timestamp: float = field(default_factory=time.time)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    diff_info: Optional[DiffInfo] = None
 
     @property
     def is_running(self) -> bool:
@@ -204,10 +205,10 @@ class ActivityEvent:
                 header = f"{marker} Reading {tgt}"
 
         elif op == ActivityOperation.EDITING:
-            header = f"{marker} Editing {tgt}"
+            header = f"{marker} {'Edited' if self.status == ActivityStatus.COMPLETED else 'Editing'} {tgt}"
 
         elif op == ActivityOperation.CREATING:
-            header = f"{marker} Creating {tgt}"
+            header = f"{marker} {'Created' if self.status == ActivityStatus.COMPLETED else 'Creating'} {tgt}"
 
         elif op == ActivityOperation.DELETING:
             if self.status == ActivityStatus.COMPLETED:
@@ -257,6 +258,13 @@ class ActivityEvent:
                     if line.strip():
                         lines.append(f"  {line.strip()}")
 
+        if self.diff_info and self.diff_info.lines:
+            for diff_line in self.diff_info.lines[:8]:
+                prefix = "+" if diff_line.type == "add" else ("-" if diff_line.type == "remove" else " ")
+                lines.append(f"  {prefix} {diff_line.content}")
+            if len(self.diff_info.lines) > 8:
+                lines.append("  …")
+
         return lines
 
     def to_activity_model(self) -> "ActivityModel":
@@ -295,6 +303,7 @@ class ActivityEvent:
             timestamp=self.timestamp,
             metadata=self.metadata,
             activity_event=self,
+            diff_info=self.diff_info,
             additions=self.additions,
             deletions=self.deletions,
             change_summary=self.change_summary,

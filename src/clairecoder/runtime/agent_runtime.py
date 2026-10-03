@@ -12,6 +12,7 @@ Correction #14: Extracted from app.py to establish a clean boundary:
 """
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -1410,6 +1411,11 @@ class AgentRuntime:
                 provided_graph.finalize()
             return provided_graph, None
 
+        # Use the documented adaptive planning levels. Simple requests should
+        # not pay for a second model call that can invent unrelated tasks or
+        # validation criteria; complex work still gets a structured plan.
+        planning_level = _planning_level_for_objective(objective_req)
+
         # Workflow creation
         wf = None
         if self._workflow_manager:
@@ -1418,7 +1424,14 @@ class AgentRuntime:
                 self._workflow_manager.remove_workflow(workflow_id)
                 wf = None
             if not wf:
-                wf = self._workflow_manager.create_workflow(workflow_id, objective_id, "Main workflow")
+                wf = self._workflow_manager.create_workflow(
+                    workflow_id,
+                    objective_id,
+                    "Main workflow",
+                    planning_level=planning_level,
+                )
+            else:
+                wf.planning_level = planning_level
 
         self._emit(
             EventType.PLAN_STARTED,
@@ -1428,7 +1441,7 @@ class AgentRuntime:
         )
 
         model_resp = None
-        if self._engineering_engine and active_model:
+        if planning_level != PlanningLevel.DIRECT and self._engineering_engine and active_model:
             use_structured = True
             if self._model_gateway and hasattr(self._model_gateway, "check_capability"):
                 from clairecoder.gateway.types import Capability
@@ -1447,7 +1460,7 @@ class AgentRuntime:
 
             req = self._planner.build_planning_request(
                 objective=objective_req,
-                planning_level=PlanningLevel.STRUCTURED,
+                planning_level=planning_level,
                 context_summary="Planning phase",
                 model_id=active_model,
                 use_structured_output=use_structured,
@@ -1467,7 +1480,7 @@ class AgentRuntime:
             plan = self._planner.create_plan(
                 workflow_id=workflow_id,
                 objective=objective_req,
-                planning_level=PlanningLevel.STRUCTURED,
+                planning_level=planning_level,
                 model_response=model_resp,
             )
         except PlanningError as pe:
@@ -1600,7 +1613,7 @@ class AgentRuntime:
 
         # 2. EngineeringEngine interaction loop
         if self._engineering_engine is not None and session_id is not None:
-            return self._engineering_engine.interaction_loop(session_id, task.id, max_iterations=5)
+            return self._engineering_engine.interaction_loop(session_id, task.id, max_iterations=12)
 
         # 3. Default fallback
         return ExecutionResult(success=True, task_id=task.id, outputs=["Default execution succeeded"])
@@ -2166,3 +2179,21 @@ class AgentRuntime:
             final_failure=not success,
             verification_results=verification_results or {},
         )
+
+
+def _planning_level_for_objective(objective: str) -> PlanningLevel:
+    """Choose a modest planning depth from the size and shape of the request."""
+    text = (objective or "").strip()
+    words = re.findall(r"[\w'-]+", text)
+    complex_request = re.search(
+        r"\b(architecture|architectural|refactor|restructure|migration|migrate|"
+        r"integrate|across|multiple|several|entire|end-to-end|multi-step|workflow|"
+        r"redesign|system-wide)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if len(words) <= 14 and not complex_request:
+        return PlanningLevel.DIRECT
+    if len(words) <= 32 and not complex_request:
+        return PlanningLevel.LIGHTWEIGHT
+    return PlanningLevel.STRUCTURED

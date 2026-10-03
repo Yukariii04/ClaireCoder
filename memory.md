@@ -276,6 +276,23 @@ clairecoder/
   - Added `save_session = save` and `load_session = get` convenience aliases on `SessionStore`.
   - Added public gateway inspection methods `get_registered_model_ids()` and `list_models()`.
 
+### Correction #24.1 — Coding Workflow & TUI Recovery
+- **Diagnosis**:
+  - The CLI TUI subscribed to legacy controller messages but not the semantic runtime event stream that carries file reads, writes, commands, diffs, and verification states.
+  - Simple objectives still invoked a structured planner that could invent unrelated tasks and validation criteria; reused sessions could also retain tasks from prior objectives.
+  - The default permission mode interrupted workspace reads, session-wide approvals matched only one exact resource, and the Windows terminal executed through `cmd.exe` while the model was not told which shell syntax to use.
+  - Small local models could return a fenced code answer without invoking tools, leaving implementation unapplied.
+- **Changes**:
+  - Connected runtime file, command, verification, and changeset events to the TUI and removed the false “Objective accepted” activity; approval views retain recent work context.
+  - Restored readable read/edit/run activity with concise diffs, and surfaced run/task failures without duplicating generic controller events.
+  - Set the default to assisted permissions (workspace reads are allowed; writes and commands remain gated); “always this session” grants now cover the selected tool/action/category throughout the session.
+  - Made shell execution PowerShell-native on Windows and provided the operating system and shell in the implementation prompt.
+  - Kept test commands PowerShell-compatible on Windows and made diagnostics use workspace-confined paths and argument arrays under an execution permission instead of shell execution under a read permission.
+  - Added direct planning for short single-step requests, pruned other-objective tasks from reused sessions, and added a narrow code-fence fallback that writes only a new workspace file through the normal permission boundary.
+  - Kept implementation response prose and file-write receipts out of verification criteria, preventing arbitrary model text from becoming a fabricated check.
+- **Verification**: Not run; the user requested diagnosis and repair, and this run did not execute tests.
+- **Artifact**: `Phase_CLI_TUI_Stage_7_Correction_24_1.zip`.
+
 ---
 
 ## 5. Phase Verification Matrix
@@ -312,11 +329,15 @@ clairecoder/
 | **Stage 7 Correction #21** | Session / Persistence State & Runtime Resume | Completed & Verified |
 | **Stage 7 Correction #22** | Provider Reliability & Normalized Error Protocol | Completed & Verified |
 | **Stage 7 Correction #23** | End-to-End Hardening & Integration Invariants (1053 tests passing) | Completed & Verified |
+| **Stage 7 Correction #24** | Agent Tool Execution & Permission Workflow | Implemented; tests not run |
+| **Stage 7 Correction #24.1** | Coding Workflow, Permission Scope, Windows Shell & Runtime TUI Activities | Implemented; tests not run |
 
 ---
 
 ## 6. Artifact Ledger
 
+- `Phase_CLI_TUI_Stage_7_Correction_24_1.zip` (Current implementation snapshot; tests not run)
+- `Phase_CLI_TUI_Stage_7_Correction_24.zip` (Previous baseline)
 - `Phase_CLI_TUI_Stage_7_Correction_23_1.zip` (Previous authoritative baseline)
 - `Phase_CLI_TUI_Stage_7_Correction_23.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_22.zip`

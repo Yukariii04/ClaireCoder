@@ -250,7 +250,35 @@ class AnthropicAdapter(ProviderAdapterInterface):
             if role == "system":
                 system_parts.append(content if isinstance(content, str) else str(content))
             elif role == "assistant":
-                anthropic_msgs.append({"role": "assistant", "content": content})
+                blocks = []
+                if content:
+                    blocks.append({"type": "text", "text": str(content)})
+                for call in msg.get("tool_calls", []) or []:
+                    function = call.get("function", {})
+                    raw_args = function.get("arguments", call.get("arguments", {}))
+                    if isinstance(raw_args, str):
+                        try:
+                            input_args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            input_args = {}
+                    else:
+                        input_args = raw_args if isinstance(raw_args, dict) else {}
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": call.get("id") or call.get("tool_call_id", ""),
+                        "name": function.get("name") or call.get("name", ""),
+                        "input": input_args,
+                    })
+                anthropic_msgs.append({"role": "assistant", "content": blocks or ""})
+            elif role == "tool":
+                anthropic_msgs.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": msg.get("tool_call_id", ""),
+                        "content": str(content),
+                    }],
+                })
             else:
                 anthropic_msgs.append({"role": "user", "content": content})
 
