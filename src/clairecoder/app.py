@@ -32,6 +32,7 @@ from clairecoder.verification.types import VerificationStatus, VerificationCrite
 from clairecoder.runtime.agent_runtime import AgentRuntime, RunResult
 from clairecoder.runtime.emitter import EventEmitter
 from clairecoder.runtime.bridge import EngineBridge
+from clairecoder.changeset.store import ChangeSetStore
 
 
 class ClaireCoderV1:
@@ -50,6 +51,7 @@ class ClaireCoderV1:
         execution_manager: Optional[ExecutionManager] = None,
         verification_engine: Optional[VerificationEngine] = None,
         workspace_root: Optional[str] = None,
+        changeset_store: Optional[ChangeSetStore] = None,
     ):
         from clairecoder.gateway.gateway import ModelGateway
         from clairecoder.tools.registry import ToolRegistry
@@ -99,16 +101,23 @@ class ClaireCoderV1:
             model_gateway=self.model_gateway,
             config_manager=self.config_manager,
             workspace_root=workspace_root,
+            changeset_store=changeset_store,
         )
 
     @classmethod
     def create_default(
         cls,
         model_gateway: Optional[ModelGatewayInterface] = None,
-        workspace_root: Optional[str] = None
+        workspace_root: Optional[str] = None,
+        changeset_store: Optional[ChangeSetStore] = None,
     ) -> "ClaireCoderV1":
         """Factory method to construct a default ClaireCoderV1 application instance."""
-        return cls(model_gateway=model_gateway, workspace_root=workspace_root)
+        return cls(model_gateway=model_gateway, workspace_root=workspace_root, changeset_store=changeset_store)
+
+    @property
+    def changeset_store(self) -> ChangeSetStore:
+        """Access the runtime ChangeSetStore."""
+        return self.agent_runtime.changeset_store
         
     def get_active_model_id(self) -> Optional[str]:
         """Get the authoritative active model ID from configuration or registered gateway models."""

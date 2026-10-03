@@ -44,10 +44,15 @@ class EventType(str, Enum):
     TOOL_COMPLETED = "tool.completed"
     TOOL_FAILED = "tool.failed"
 
+    # --- Changeset lifecycle (Correction #16) ---
+    CHANGESET_CREATED = "changeset.created"
+    CHANGESET_COMPLETED = "changeset.completed"
+
     # --- File operations ---
     FILE_READ = "file.read"
     FILE_CREATED = "file.created"
     FILE_EDITED = "file.edited"
+    FILE_MODIFIED = "file.modified"
     FILE_DELETED = "file.deleted"
 
     # --- Command execution ---
@@ -84,7 +89,7 @@ class RuntimeEvent:
     """Central structured runtime event.
 
     Carries correlation IDs for event tracing across:
-      run → objective → task → tool_call
+      run → objective → task → tool_call → changeset
 
     The payload dict holds event-specific structured data.
     """
@@ -98,6 +103,7 @@ class RuntimeEvent:
     objective_id: Optional[str] = None
     task_id: Optional[str] = None
     tool_call_id: Optional[str] = None
+    changeset_id: Optional[str] = None
 
     # --- Structured payload ---
     payload: Dict[str, Any] = field(default_factory=dict)
@@ -122,6 +128,8 @@ class RuntimeEvent:
             d["task_id"] = self.task_id
         if self.tool_call_id is not None:
             d["tool_call_id"] = self.tool_call_id
+        if self.changeset_id is not None:
+            d["changeset_id"] = self.changeset_id
         if self.attempt is not None:
             d["attempt"] = self.attempt
         if self.payload:
@@ -139,6 +147,7 @@ class RuntimeEvent:
             objective_id=data.get("objective_id"),
             task_id=data.get("task_id"),
             tool_call_id=data.get("tool_call_id"),
+            changeset_id=data.get("changeset_id"),
             attempt=data.get("attempt"),
             payload=data.get("payload", {}),
         )

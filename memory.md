@@ -153,9 +153,12 @@ RFD (9 docs) → RES (8 docs) → ADR (6 docs) → PRD (10 docs) → IMPLEMENTAT
   - **E2E Coding Agent Acceptance Tests (§36, §37)**: 72 new comprehensive tests in `tests/tools/test_correction_10.py` and `tests/tools/test_mode_policy.py`.
   - **Test Suite Pass Rate**: 656 passed, 0 skipped, 0 failures, 0 errors, 0 warnings (`pytest -W error`).
 
+- **Current**: CLI / TUI Stage 7 Correction #16 (ChangeSet / Diff Store + Deterministic Unified Diff + ChangeTracker + Non-invasive Workspace State Capture + Runtime Events + ExecutionResult changeset_id + Binary File Safety) completed.
+- **Completed**: Phase 1-12, CLI / TUI Stage 1-6 (Corrections #1-#10), Stage 7 (Corrections #1-#16).
+
 ### Current State
-- **Active Stage**: Stage 7 Correction #15 Completed and Verified.
-- **Next Steps**: Await user testing feedback and authorization before proceeding to Correction #16.
+- **Active Stage**: Stage 7 Correction #16 Completed and Verified.
+- **Next Steps**: Await user testing feedback and authorization before proceeding to Correction #17.
 
 ### Phase Status
 - **Phase 1-12**: Completed and Approved.
@@ -178,8 +181,10 @@ RFD (9 docs) → RES (8 docs) → ADR (6 docs) → PRD (10 docs) → IMPLEMENTAT
 - **CLI / TUI Stage 7 Correction #13 (Structured Task Graph + Semantic Task Model + Dependency Resolution + Failure Propagation + Attempt Tracking + Planner Preservation)**: Completed and Verified.
 - **CLI / TUI Stage 7 Correction #14 (Agent Runtime Extraction + Decoupled Execution Lifecycle + Thin App + Clean Failure & Verification Boundaries + Non-Contradictory State Machine)**: Completed and Verified.
 - **CLI / TUI Stage 7 Correction #15 (Structured Planner + Schema-Driven ModelRequest + Compact DAG Prompting + Strict Plan Validation + Safe Provider Fallback + Task Metadata Preservation)**: Completed and Verified.
+- **CLI / TUI Stage 7 Correction #16 (ChangeSet / Diff Store + Deterministic Unified Diff + Workspace ChangeTracker + ExecutionResult Integration + Runtime Events + Binary File Safety)**: Completed and Verified.
 
 ### Recent Artifacts
+- `Phase_CLI_TUI_Stage_7_Correction_16.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_15.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_14.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_13.zip`

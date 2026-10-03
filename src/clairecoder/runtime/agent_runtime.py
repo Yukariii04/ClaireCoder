@@ -39,6 +39,13 @@ from clairecoder.verification.types import (
 )
 from clairecoder.runtime.events import EventType, RuntimeEvent
 from clairecoder.runtime.emitter import EventEmitter
+from clairecoder.changeset.types import (
+    ChangeSet,
+    ChangeSetStatus,
+    FileOperation,
+)
+from clairecoder.changeset.store import ChangeSetStore
+from clairecoder.changeset.tracker import ChangeTracker
 
 
 # =============================================================================
@@ -83,6 +90,7 @@ class AgentRuntime:
         model_gateway: Optional[Any] = None,
         config_manager: Optional[Any] = None,
         workspace_root: Optional[str] = None,
+        changeset_store: Optional[ChangeSetStore] = None,
     ) -> None:
         self._planner = planner if planner is not None else Planner()
         self._executor = executor
@@ -95,6 +103,7 @@ class AgentRuntime:
         self._model_gateway = model_gateway
         self._config_manager = config_manager
         self._workspace_root = workspace_root
+        self._changeset_store = changeset_store if changeset_store is not None else ChangeSetStore()
 
     @property
     def event_emitter(self) -> EventEmitter:
@@ -103,6 +112,10 @@ class AgentRuntime:
     @property
     def planner(self) -> Planner:
         return self._planner
+
+    @property
+    def changeset_store(self) -> ChangeSetStore:
+        return self._changeset_store
 
     # =========================================================================
     # PRIMARY EXECUTION ENTRY POINT
@@ -270,6 +283,10 @@ class AgentRuntime:
                 exec_id = f"exec_{task_id}_{attempt_num}"
                 self._sync_task_start(task, session_id, workflow_id, exec_id, attempt_num)
 
+                # Capture workspace state BEFORE task execution (Correction #16)
+                tracker = ChangeTracker(workspace_root=self._workspace_root)
+                tracker.capture_before()
+
                 # Execute Task via Executor
                 try:
                     exec_result = self._execute_task(task, session_id=session_id, attempt_number=attempt_num)
@@ -281,6 +298,33 @@ class AgentRuntime:
                         failure_evidence=FailureEvidence(task_id=task_id, reason=str(e)),
                         task_id=task_id,
                     )
+
+                # Capture workspace state AFTER task execution & calculate changeset (Correction #16)
+                changeset = tracker.capture_after(task_id=task_id, run_id=run_id)
+                if not exec_result.success:
+                    changeset.status = ChangeSetStatus.FAILED
+                else:
+                    changeset.status = ChangeSetStatus.APPLIED
+
+                self._changeset_store.record_changeset(changeset)
+
+                # Expose changeset_id and changed files on ExecutionResult
+                exec_result.changeset_id = changeset.id
+                if changeset.files:
+                    new_paths = [cf.path for cf in changeset.files]
+                    if exec_result.changed_files:
+                        all_paths = list(dict.fromkeys(exec_result.changed_files + new_paths))
+                        exec_result.changed_files = all_paths
+                    else:
+                        exec_result.changed_files = new_paths
+
+                # Emit runtime events for changeset
+                self._emit_changeset_events(
+                    changeset=changeset,
+                    run_id=run_id,
+                    objective_id=objective_id,
+                    task_id=task_id,
+                )
 
                 # --- Strict Gating: Check Execution Success ---
                 if not exec_result.success:
@@ -960,6 +1004,7 @@ class AgentRuntime:
         objective_id: Optional[str] = None,
         task_id: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
+        changeset_id: Optional[str] = None,
     ) -> None:
         """Emit a structured RuntimeEvent via EventEmitter."""
         if self._event_emitter:
@@ -969,11 +1014,87 @@ class AgentRuntime:
                     run_id=run_id,
                     objective_id=objective_id,
                     task_id=task_id,
+                    changeset_id=changeset_id,
                     payload=payload or {},
                 )
                 self._event_emitter.emit(event)
             except Exception:
                 pass
+
+    def _emit_changeset_events(
+        self,
+        changeset: ChangeSet,
+        run_id: str,
+        objective_id: str,
+        task_id: str,
+    ) -> None:
+        """Emit structured runtime events for ChangeSet lifecycle and file mutations."""
+        # 1. CHANGESET_CREATED
+        self._emit(
+            EventType.CHANGESET_CREATED,
+            run_id=run_id,
+            objective_id=objective_id,
+            task_id=task_id,
+            changeset_id=changeset.id,
+            payload={
+                "run_id": run_id,
+                "task_id": task_id,
+                "changeset_id": changeset.id,
+                "file_count": len(changeset.files),
+                "total_additions": changeset.total_additions,
+                "total_deletions": changeset.total_deletions,
+                "status": changeset.status.value,
+            },
+        )
+
+        # 2. File-level events: FILE_CREATED, FILE_MODIFIED, FILE_DELETED
+        for cf in changeset.files:
+            if cf.operation == FileOperation.CREATED:
+                event_type = EventType.FILE_CREATED
+            elif cf.operation == FileOperation.MODIFIED:
+                event_type = EventType.FILE_MODIFIED
+            elif cf.operation == FileOperation.DELETED:
+                event_type = EventType.FILE_DELETED
+            else:
+                event_type = EventType.FILE_MODIFIED
+
+            self._emit(
+                event_type,
+                run_id=run_id,
+                objective_id=objective_id,
+                task_id=task_id,
+                changeset_id=changeset.id,
+                payload={
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "changeset_id": changeset.id,
+                    "path": cf.path,
+                    "operation": cf.operation.value,
+                    "additions": cf.additions,
+                    "deletions": cf.deletions,
+                    "existed_before": cf.existed_before,
+                    "is_binary": cf.is_binary,
+                },
+            )
+
+        # 3. CHANGESET_COMPLETED
+        self._emit(
+            EventType.CHANGESET_COMPLETED,
+            run_id=run_id,
+            objective_id=objective_id,
+            task_id=task_id,
+            changeset_id=changeset.id,
+            payload={
+                "run_id": run_id,
+                "task_id": task_id,
+                "changeset_id": changeset.id,
+                "file_count": len(changeset.files),
+                "total_additions": changeset.total_additions,
+                "total_deletions": changeset.total_deletions,
+                "status": changeset.status.value,
+                "paths": [f.path for f in changeset.files],
+            },
+        )
 
     def _build_result(
         self,

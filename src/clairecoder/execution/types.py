@@ -112,6 +112,7 @@ class ExecutionResult:
     changed_files: List[str] = field(default_factory=list)
     commands: List[str] = field(default_factory=list)
     duration: float = 0.0
+    changeset_id: Optional[str] = None
 
     def __init__(
         self,
@@ -126,6 +127,7 @@ class ExecutionResult:
         commands: Optional[List[str]] = None,
         duration: float = 0.0,
         success: Optional[bool] = None,
+        changeset_id: Optional[str] = None,
     ) -> None:
         if category is not None:
             self.category = category
@@ -143,6 +145,7 @@ class ExecutionResult:
         self.changed_files = changed_files or []
         self.commands = commands or []
         self.duration = duration
+        self.changeset_id = changeset_id
 
     @property
     def success(self) -> bool:
@@ -151,6 +154,52 @@ class ExecutionResult:
     @success.setter
     def success(self, val: bool) -> None:
         self.category = ExecutionResultCategory.SUCCESS if val else ExecutionResultCategory.FAILURE
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize ExecutionResult to dictionary."""
+        return {
+            "success": self.success,
+            "category": self.category.value if hasattr(self.category, "value") else str(self.category),
+            "failure_category": self.failure_category.value if self.failure_category and hasattr(self.failure_category, "value") else (str(self.failure_category) if self.failure_category else None),
+            "error_message": self.error_message,
+            "task_id": self.task_id,
+            "outputs": list(self.outputs),
+            "changed_files": list(self.changed_files),
+            "commands": list(self.commands),
+            "duration": self.duration,
+            "changeset_id": self.changeset_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ExecutionResult":
+        """Deserialize ExecutionResult from dictionary."""
+        cat_str = data.get("category")
+        cat = None
+        if cat_str:
+            try:
+                cat = ExecutionResultCategory(cat_str)
+            except ValueError:
+                cat = None
+        fc_str = data.get("failure_category")
+        fc = None
+        if fc_str:
+            try:
+                fc = FailureCategory(fc_str)
+            except ValueError:
+                fc = None
+        return cls(
+            category=cat,
+            success=data.get("success"),
+            failure_category=fc,
+            error_message=data.get("error_message"),
+            task_id=data.get("task_id"),
+            outputs=data.get("outputs", []),
+            changed_files=data.get("changed_files", []),
+            commands=data.get("commands", []),
+            duration=data.get("duration", 0.0),
+            changeset_id=data.get("changeset_id"),
+        )
+
 
 
 @dataclass

@@ -1158,4 +1158,69 @@
     16. Runtime emits `RUN_FAILED` and halts cleanly on `PlanningError`.
   - Full test suite: **844 passed, 0 skipped, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_15.zip`.
-- **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning Correction #16.
+
+## 2026-10-03 — CLI / TUI Stage 7: Correction #16 (ChangeSet / Diff Store)
+
+- **Status**: Completed and Verified.
+- **Implemented**:
+  - **Structured ChangeSet & ChangedFile Data Models (`clairecoder.changeset.types`)**:
+    - Created `ChangeSet` model representing logical file mutations per execution task (`id`, `task_id`, `files`, `created_at`, `status`, `run_id`, `metadata`).
+    - Created `ChangedFile` representing atomic file mutations (`path`, `operation`, `old_content`, `new_content`, `additions`, `deletions`, `diff`, `existed_before`, `is_binary`).
+    - Differentiated operations via `FileOperation` enum (`CREATED`, `MODIFIED`, `DELETED`).
+    - Modeled lifecycle via `ChangeSetStatus` enum (`PENDING`, `RECORDED`, `APPLIED`, `COMPLETED`, `FAILED`, `REVERTED`).
+  - **Deterministic Unified Diff Generation (`clairecoder.changeset.diff`)**:
+    - Generates unified diffs using standard library `difflib.unified_diff` with deterministic headers `a/{path}` and `b/{path}` (or `/dev/null`).
+    - Stripped timestamp headers and randomized strings to ensure bitwise reproducible diffs.
+    - Normalized line endings across platforms (`\r\n` -> `\n`) to prevent spurious CRLF diffs.
+    - Tracked additions and deletions accurately from diff hunks while skipping unchanged files.
+  - **Thread-Safe ChangeSetStore (`clairecoder.changeset.store`)**:
+    - Presentation-independent storage for capturing and retrieving changesets.
+    - Implemented `create_changeset()`, `record_file_change()`, `record_changeset()`, `get_changeset()`, `list_changesets()`, `get_task_changes()`, and `get_latest_task_changeset()`.
+    - Bidirectional indexing by `changeset_id` and `task_id`.
+  - **Non-Invasive Workspace ChangeTracker (`clairecoder.changeset.tracker`)**:
+    - Snapshots workspace files before and after task execution without intrusive filesystem hooks.
+    - Enforced boundary safety: respects ignored directories (`.git`, `__pycache__`, `.venv`, `.pytest_cache`, `dist`, `build`, etc.).
+    - Handled large files (>5 MB) safely without excessive memory consumption.
+    - Detected binary files via null-byte inspection and UTF-8 decode verification; computed SHA-256 hashes to reliably detect changes while omitting misleading text diffs ("Binary files a/{path} and b/{path} differ").
+    - Deterministically sorted changed files by normalized POSIX paths.
+  - **Execution Loop Integration (`clairecoder.runtime.agent_runtime`)**:
+    - Bound workspace capture around `_execute_task()` in `AgentRuntime.run()`: capture before -> execute -> capture after -> record to `ChangeSetStore` -> emit events.
+    - Exposed `changeset_id` and mutated paths on `ExecutionResult` while maintaining 100% backward compatibility.
+    - Wired `changeset_store` property on `AgentRuntime` and `ClaireCoderV1`.
+  - **Structured Runtime Events (`clairecoder.runtime.events`)**:
+    - Added `CHANGESET_CREATED`, `CHANGESET_COMPLETED`, and `FILE_MODIFIED` to `EventType`.
+    - Added correlation field `changeset_id` to `RuntimeEvent` and its dictionary serialization.
+    - Emitted lifecycle events with full correlation (`run_id`, `task_id`, `changeset_id`, `path`, `operation`, `additions`, `deletions`).
+- **Files Created**:
+  - `src/clairecoder/changeset/__init__.py`
+  - `src/clairecoder/changeset/types.py`
+  - `src/clairecoder/changeset/diff.py`
+  - `src/clairecoder/changeset/store.py`
+  - `src/clairecoder/changeset/tracker.py`
+  - `tests/changeset/__init__.py`
+  - `tests/changeset/test_changeset.py`
+- **Files Modified**:
+  - `src/clairecoder/execution/types.py`
+  - `src/clairecoder/runtime/events.py`
+  - `src/clairecoder/runtime/agent_runtime.py`
+  - `src/clairecoder/app.py`
+  - `memory.md`
+  - `update.md`
+- **Tests**:
+  - 13 new comprehensive tests in `tests/changeset/test_changeset.py` covering all 15 specification scenarios:
+    1. `test_newly_created_file`: File creation, additions count, `/dev/null` diff header.
+    2. `test_modified_file`: In-place modifications, line additions & deletions counting.
+    3. `test_deleted_file`: File deletion, deletions count, `+++ /dev/null`.
+    4. `test_unchanged_file`: Unmodified files produce no diff and are excluded.
+    5. `test_multiple_changed_files_and_statistics`: Multi-file changes with aggregated additions and deletions.
+    6. `test_unified_diff_determinism`: Header format without timestamps, deterministic output.
+    7. `test_binary_file_handling`: Binary files safely handled without corrupted text diffs.
+    8. `test_missing_and_unreadable_file_handling`: Missing and unreadable files handled safely without crashes.
+    9. `test_deterministic_ordering`: Changed file entries strictly sorted alphabetically.
+    10. `test_changeset_store_crud_and_task_association`: Store creation, indexing, task lookup.
+    11. `test_execution_result_exposes_changeset_id`: `ExecutionResult` changeset_id integration & serialization.
+    12. `test_runtime_events_contain_changeset_info`: AgentRuntime emission of changeset events with correlation IDs.
+    13. `test_existing_execution_behavior_remains_compatible`: Read-only executions succeed cleanly.
+  - Full test suite: **857 passed, 0 skipped, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
+- **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_16.zip`.
+- **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning Correction #17.
