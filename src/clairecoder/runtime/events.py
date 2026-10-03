@@ -74,6 +74,11 @@ class EventType(str, Enum):
     RECOVERY_COMPLETED = "recovery.completed"
     RECOVERY_FAILED = "recovery.failed"
 
+    # --- Role Lifecycle (Correction #18) ---
+    ROLE_STARTED = "role.started"
+    ROLE_COMPLETED = "role.completed"
+    ROLE_FAILED = "role.failed"
+
     # --- Agent messages ---
     AGENT_MESSAGE = "agent.message"
     AGENT_ERROR = "agent.error"

@@ -8,6 +8,7 @@ Correction #14: Extracted from app.py to establish a clean boundary:
     EXECUTOR     — executes tool/model actions for a task
     VERIFIER     — verifies whether task execution succeeded
     EVENT SYSTEM — reports structured runtime events (Correction #12)
+    ROLES        — bounded role responsibilities (Correction #18)
 """
 
 import uuid
@@ -48,6 +49,17 @@ from clairecoder.changeset.types import (
 )
 from clairecoder.changeset.store import ChangeSetStore
 from clairecoder.changeset.tracker import ChangeTracker
+from clairecoder.runtime.roles import (
+    Role,
+    RoleContext,
+    RoleResult,
+    RoleRegistry,
+    AgentRole,
+    PlannerRole,
+    ImplementerRole,
+    VerifierRole,
+    RecoveryRole,
+)
 
 
 # =============================================================================
@@ -99,6 +111,7 @@ class AgentRuntime:
         workspace_root: Optional[str] = None,
         changeset_store: Optional[ChangeSetStore] = None,
         max_task_retries: int = 0,
+        role_registry: Optional[RoleRegistry] = None,
     ) -> None:
         self._planner = planner if planner is not None else Planner()
         self._executor = executor
@@ -113,6 +126,7 @@ class AgentRuntime:
         self._workspace_root = workspace_root
         self._changeset_store = changeset_store if changeset_store is not None else ChangeSetStore()
         self._max_task_retries = max_task_retries
+        self._role_registry = role_registry if role_registry is not None else self._build_default_registry()
 
     @property
     def event_emitter(self) -> EventEmitter:
@@ -129,6 +143,107 @@ class AgentRuntime:
     @property
     def max_task_retries(self) -> int:
         return self._max_task_retries
+
+    @property
+    def role_registry(self) -> RoleRegistry:
+        """Access the role registry for inspection or injection."""
+        return self._role_registry
+
+    def _build_default_registry(self) -> RoleRegistry:
+        """Build a default role registry from current subsystem configuration."""
+        registry = RoleRegistry()
+        # Register roles from available subsystems
+        if self._planner is not None:
+            registry.register(Role.PLANNER, PlannerRole(self._planner))
+        if self._executor is not None:
+            registry.register(Role.IMPLEMENTER, ImplementerRole(self._executor))
+        if self._verifier is not None:
+            registry.register(Role.VERIFIER, VerifierRole(self._verifier))
+        registry.register(Role.RECOVERY, RecoveryRole(
+            max_task_retries=self._max_task_retries,
+        ))
+        return registry
+
+    def invoke_role(
+        self,
+        role: Role,
+        context: RoleContext,
+        run_id: Optional[str] = None,
+        objective_id: Optional[str] = None,
+    ) -> RoleResult:
+        """Invoke a role with structured event emission and failure isolation.
+
+        Lifecycle:
+            ROLE_STARTED -> role.execute(context) -> ROLE_COMPLETED or ROLE_FAILED
+
+        Role failures are caught and returned as RoleResult(success=False).
+        A role failure cannot produce a false-successful task or run.
+        """
+        r_run_id = run_id or context.run_id
+        r_obj_id = objective_id or context.objective_id
+
+        # Resolve role implementation
+        try:
+            impl = self._role_registry.resolve(role)
+        except KeyError as e:
+            return RoleResult(
+                role=role,
+                success=False,
+                error=str(e),
+            )
+
+        # Emit ROLE_STARTED
+        self._emit(
+            EventType.ROLE_STARTED,
+            run_id=r_run_id,
+            objective_id=r_obj_id,
+            task_id=context.task_id,
+            payload={
+                "role": role.value,
+                "description": impl.description,
+                **context.to_dict(),
+            },
+        )
+
+        # Execute with failure isolation
+        try:
+            result = impl.execute(context)
+        except Exception as e:
+            result = RoleResult(
+                role=role,
+                success=False,
+                error=str(e),
+                evidence={"exception_type": type(e).__name__},
+            )
+
+        # Emit outcome
+        if result.success:
+            self._emit(
+                EventType.ROLE_COMPLETED,
+                run_id=r_run_id,
+                objective_id=r_obj_id,
+                task_id=context.task_id,
+                payload={
+                    "role": role.value,
+                    "success": True,
+                    **result.to_dict(),
+                },
+            )
+        else:
+            self._emit(
+                EventType.ROLE_FAILED,
+                run_id=r_run_id,
+                objective_id=r_obj_id,
+                task_id=context.task_id,
+                payload={
+                    "role": role.value,
+                    "success": False,
+                    "error": result.error,
+                    **result.to_dict(),
+                },
+            )
+
+        return result
 
     def _get_max_retries(self, task: Task, max_task_retries: int) -> int:
         """Resolve maximum allowed retries for a task."""

@@ -1292,4 +1292,65 @@
     15. `test_existing_execution_behavior_remains_compatible`: Backward compatibility maintained for standard runs.
   - Full test suite: **872 passed, 0 skipped, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_17.zip`.
-- **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning Correction #18.
+- **Next Authorized Milestone**: Proceed to Correction #18.
+
+## 2026-10-03 — CLI / TUI Stage 7: Correction #18 (Agent Roles / Subagents Architecture)
+
+- **Status**: Completed and Verified.
+- **Implemented**:
+  - **Bounded Role Model (`clairecoder.runtime.roles`)**:
+    - Created `Role` string enum defining architectural responsibilities: `PLANNER`, `IMPLEMENTER`, `VERIFIER`, `RECOVERY`.
+    - Defined abstract `AgentRole` contract with `name`, `description`, and `execute(context: RoleContext) -> RoleResult`.
+    - Roles coordinate specific responsibilities rather than creating separate runtimes, task systems, or event systems.
+  - **Bounded Role Context (`RoleContext`)**:
+    - Scoped context dataclass carrying only the bounded information needed by a role (`run_id`, `objective`, `objective_id`, `session_id`, `task_id`, `task`, `execution_result`, `verification_result`, `changeset`, `failure_evidence`, `attempt`, `metadata`).
+    - Does NOT expose arbitrary full runtime state, mutable internals, or runtime control handles to roles.
+  - **Structured Role Result (`RoleResult`)**:
+    - Carries structured outcome `role`, `success`, `output`, `error`, `evidence`, and `metadata`.
+    - Supports clean dictionary serialization (`to_dict`).
+  - **Role Registry & Resolution (`RoleRegistry`)**:
+    - Decoupled registration, resolution, and introspection (`register`, `resolve`, `has`, `unregister`, `registered_roles`, `to_dict`).
+    - Defaults wired to existing subsystem implementations: `PlannerRole` -> `Planner`, `ImplementerRole` -> `executor`, `VerifierRole` -> `verifier`, `RecoveryRole` -> recovery budget.
+    - Swappable and injectable without hidden global state, allowing test injection of mock/fake roles.
+  - **Concrete Role Implementations**:
+    - `PlannerRole`: Delegates to structured Planner (`create_plan`, `create_tasks_from_plan`) without duplicating planning logic.
+    - `ImplementerRole`: Delegates task execution to underlying executor (`execute`) making execution responsibility explicit.
+    - `VerifierRole`: Delegates to structured Verifier (`verify`) maintaining verification as the authoritative gate for task correctness.
+    - `RecoveryRole`: Evaluates retry budget, replan budget, and failure evidence to return structured `RecoveryDecision` (`RETRY`, `REPLAN`, `FAIL`) without executing unlimited retries or mutating TaskGraph directly.
+  - **Single Orchestration Authority (`AgentRuntime`)**:
+    - `AgentRuntime` remains the single orchestrator owning lifecycle, TaskGraph, state transitions, event emissions, and recovery application.
+    - Roles do not coordinate each other directly, do not own TaskGraph, and do not create independent event streams.
+    - Added `invoke_role(role, context)` with full failure containment: catches all exceptions, records structured evidence, and returns `RoleResult(success=False)`.
+  - **Structured Role Events (`clairecoder.runtime.events`)**:
+    - Added `ROLE_STARTED`, `ROLE_COMPLETED`, and `ROLE_FAILED` to `EventType`.
+    - All role events carry correlation data (`run_id`, `task_id`, `role`, payloads).
+  - **Failure Isolation & Non-False-Success**:
+    - Crashing or failing roles cannot produce a false-successful task or run. Failures are captured into structured evidence.
+  - **Full Backward Compatibility**:
+    - Standard `AgentRuntime` instantiation and execution works seamlessly without requiring explicit role configuration.
+- **Files Created**:
+  - `src/clairecoder/runtime/roles.py`
+  - `tests/runtime/test_agent_roles.py`
+- **Files Modified**:
+  - `src/clairecoder/runtime/events.py`
+  - `src/clairecoder/runtime/agent_runtime.py`
+  - `src/clairecoder/runtime/__init__.py`
+  - `memory.md`
+  - `update.md`
+- **Tests**:
+  - 34 new comprehensive tests in `tests/runtime/test_agent_roles.py` covering:
+    1. Role enum definitions and values
+    2. RoleRegistry registration, resolution, unregistration, error handling
+    3. PlannerRole delegation to existing Planner
+    4. ImplementerRole delegation to existing executor
+    5. VerifierRole delegation to existing Verifier
+    6. RecoveryRole bounded decisions (retry, replan, fail) and budget enforcement
+    7. RoleContext bounded information and serialization
+    8. Structured role lifecycle events (`ROLE_STARTED`, `ROLE_COMPLETED`, `ROLE_FAILED`) with correlation data
+    9. Role failure isolation and evidence recording (no false success)
+    10. Injected fake/mock roles via RoleRegistry
+    11. AgentRuntime single orchestration authority preservation
+    12. Backward compatibility with existing execution, verification, and recovery
+  - Full test suite: **906 passed, 0 skipped, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
+- **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_18.zip`.
+- **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning next phase.
