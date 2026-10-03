@@ -1,13 +1,43 @@
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
 from .types import Model, ModelRequest, ModelResponse, Capability, ModelError, ErrorCategory, ModelProfile
 from .interfaces import ModelGatewayInterface, ProviderAdapterInterface
+from .errors import ProviderError, ProviderUnavailableError
+from .reliability import ReliabilityConfig, ProviderHealthTracker, RetryExecutor
 
 class ModelGateway(ModelGatewayInterface):
-    def __init__(self):
+    def __init__(
+        self,
+        reliability_config: Optional[ReliabilityConfig] = None,
+        event_emitter: Optional[Any] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+        time_fn: Optional[Callable[[], float]] = None,
+    ):
         self._adapters: Dict[str, ProviderAdapterInterface] = {}
         self._models: Dict[str, Model] = {}
         self._profiles: Dict[str, ModelProfile] = {}
         self.last_request_debug: Optional[Dict[str, Any]] = None
+        self.reliability_config = reliability_config or ReliabilityConfig()
+        self.event_emitter = event_emitter
+        self._sleep_fn = sleep_fn
+        self._time_fn = time_fn or time.time
+        self.health_tracker = ProviderHealthTracker(
+            failure_threshold=self.reliability_config.failure_threshold_for_cooldown,
+            cooldown_seconds=self.reliability_config.cooldown_seconds,
+            time_fn=self._time_fn,
+        )
+        self.retry_executor = RetryExecutor(
+            config=self.reliability_config,
+            health_tracker=self.health_tracker,
+            event_emitter=self.event_emitter,
+            sleep_fn=self._sleep_fn,
+            time_fn=self._time_fn,
+        )
+
+    def set_event_emitter(self, emitter: Any) -> None:
+        """Set or update the runtime event emitter for provider lifecycle events."""
+        self.event_emitter = emitter
+        self.retry_executor.event_emitter = emitter
 
     def register_adapter(self, adapter: ProviderAdapterInterface) -> None:
         self._adapters[adapter.provider_id] = adapter
@@ -55,11 +85,12 @@ class ModelGateway(ModelGatewayInterface):
         # Find adapter
         adapter = self._adapters.get(model.provider.id)
         if not adapter:
-            raise ModelError(
+            raise ProviderError(
                 category=ErrorCategory.ENDPOINT_FAILURE,
                 message=f"No adapter registered for provider: {model.provider.id}",
-                provider_id=model.provider.id,
-                model_id=request.model_id
+                provider=model.provider.id,
+                model=request.model_id,
+                retryable=False,
             )
 
         # Record safe debug inspection hook
@@ -69,18 +100,25 @@ class ModelGateway(ModelGatewayInterface):
             "model_id": request.model_id,
             "adapter": adapter.__class__.__name__,
         }
-            
-        try:
-            # Delegate to provider adapter
-            return adapter.execute(model, request)
-        except ModelError:
-            # Let ModelErrors propagate directly
-            raise
-        except Exception as e:
-            # Wrap unexpected errors to maintain Gateway abstraction
-            raise ModelError(
-                category=ErrorCategory.UNKNOWN,
-                message=f"Unexpected execution error: {str(e)}",
-                provider_id=model.provider.id,
-                model_id=model.id
-            ) from e
+
+        def _do_execute() -> ModelResponse:
+            try:
+                response = adapter.execute(model, request)
+                return response
+            except ModelError:
+                raise
+            except Exception as e:
+                raise ProviderError(
+                    category=ErrorCategory.UNKNOWN,
+                    message=f"Unexpected execution error: {str(e)}",
+                    provider=model.provider.id,
+                    model=model.id,
+                    retryable=False,
+                ) from e
+
+        return self.retry_executor.execute_with_retry(
+            provider_id=model.provider.id,
+            model_id=request.model_id,
+            operation="chat" if not request.stream else "stream",
+            func=_do_execute,
+        )

@@ -87,6 +87,12 @@ class EventType(str, Enum):
     SESSION_FAILED = "session.failed"
     SESSION_INTERRUPTED = "session.interrupted"
 
+    # --- Provider lifecycle (Correction #22) ---
+    PROVIDER_REQUEST_STARTED = "provider.request.started"
+    PROVIDER_REQUEST_RETRYING = "provider.request.retrying"
+    PROVIDER_REQUEST_COMPLETED = "provider.request.completed"
+    PROVIDER_REQUEST_FAILED = "provider.request.failed"
+
     # --- Agent messages ---
     AGENT_MESSAGE = "agent.message"
     AGENT_ERROR = "agent.error"

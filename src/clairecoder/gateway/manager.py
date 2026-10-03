@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import ProviderProfile
 from .credentials import CredentialStore
+from .reliability import ReliabilityConfig
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class ConfigurationManager:
                 providers/
                     <profile_id>.json    — ProviderProfile (no secrets)
                 active.json              — active provider + model selection
+                reliability.json         — reliability & retry settings
     """
 
     def __init__(self, workspace_root: Optional[str] = None, credential_store: Optional[CredentialStore] = None):
@@ -30,11 +32,30 @@ class ConfigurationManager:
         self._config_dir = root / ".clairecoder" / "config"
         self._providers_dir = self._config_dir / "providers"
         self._active_path = self._config_dir / "active.json"
+        self._reliability_path = self._config_dir / "reliability.json"
         self._credential_store = credential_store or CredentialStore()
 
     @property
     def credential_store(self) -> CredentialStore:
         return self._credential_store
+
+    def get_reliability_config(self) -> ReliabilityConfig:
+        """Load provider reliability settings from disk, or return safe defaults."""
+        if not self._reliability_path.exists():
+            return ReliabilityConfig()
+        try:
+            with self._reliability_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            return ReliabilityConfig.from_dict(data)
+        except Exception as e:
+            logger.warning("Failed loading reliability config, using defaults: %s", e)
+            return ReliabilityConfig()
+
+    def save_reliability_config(self, config: ReliabilityConfig) -> None:
+        """Persist provider reliability settings."""
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        with self._reliability_path.open("w", encoding="utf-8") as f:
+            json.dump(config.to_dict(), f, indent=2)
 
     # ── Provider Profile CRUD ───────────────────────────────────────────────
 

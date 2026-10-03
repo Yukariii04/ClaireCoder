@@ -237,6 +237,28 @@ clairecoder/
   - Added CLI flags: `--resume <SESSION_ID>`, `--list-sessions`, `--inspect-session <SESSION_ID>`.
   - TUI activity mapper displays session resume / interrupt transitions while maintaining TUI presentation-only boundary.
 
+### Correction #22 — Provider Reliability
+- **Structured Provider Error Model (`clairecoder.gateway.errors`)**:
+  - Normalized error hierarchy inheriting from `ModelError`: `ProviderError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderRateLimitError`, `ProviderAuthenticationError`, `ProviderUnavailableError`, `ProviderResponseError`, `ProviderInvalidOutputError`.
+  - Explicit retryable semantics: connection errors, timeouts, HTTP 429, 503/529, and 5xx are retryable; 401/403, invalid output, and client 4xx are strictly non-retryable.
+  - Secret scrubbing (`sanitize_sensitive_data`): Scrubs Bearer tokens, `Authorization: ...`, `api_key=...`, `x-api-key: ...`, query parameter keys, and passwords from errors, strings, dicts, and event logs.
+- **Bounded Retry Execution & Exponential Backoff (`clairecoder.gateway.reliability`)**:
+  - `ReliabilityConfig`: Configurable `request_timeout` (60.0s), `max_retry_attempts` (3), `initial_retry_delay` (1.0s), `max_retry_delay` (30.0s), `backoff_factor` (2.0), `enable_cooldown` (True), `cooldown_seconds` (30.0s). Persisted at `.clairecoder/config/reliability.json`.
+  - `RetryExecutor`: Orchestrates bounded retry attempts with exponential backoff calculation and respect for `Retry-After` HTTP headers.
+  - Injected clock and sleep functions for fully deterministic testing without sleeping in unit tests.
+- **Lightweight Provider Health & Cooldown Tracking**:
+  - `ProviderHealthTracker`: Tracks consecutive failures per provider and imposes an in-memory bounded cooldown window upon reaching threshold, preventing repeated hammering of dead endpoints. Resets immediately on success.
+- **Adapter Safety & Endpoint Validation**:
+  - Hardened `OllamaAdapter`, `OpenAICompatibleAdapter`, `AnthropicAdapter`, and `GeminiAdapter`.
+  - Endpoint validation rejects relative URLs (e.g. `/models`, `/api/chat`) and empty URLs with clear `ProviderConnectionError`.
+  - Explicit timeout validation and urllib timeout enforcement across all adapters.
+  - Ollama safety: parses `/api/chat`, handles HTTP errors cleanly, and treats HTTP 200 with missing `message` or empty model response as structured `ProviderResponseError`.
+- **Runtime Events & Structured Output Distinction**:
+  - Emits provider lifecycle events: `PROVIDER_REQUEST_STARTED`, `PROVIDER_REQUEST_RETRYING`, `PROVIDER_REQUEST_COMPLETED`, `PROVIDER_REQUEST_FAILED`.
+  - Clearly distinguishes provider transport/connection failures from planner structured validation failures (`ProviderInvalidOutputError`).
+
+---
+
 ## 5. Phase Verification Matrix
 
 | Phase / Milestone | Description | Status |
@@ -269,11 +291,13 @@ clairecoder/
 | **Stage 7 Correction #19** | Tool & Workspace Layer Boundary | Completed & Verified |
 | **Stage 7 Correction #20** | TUI Activity System & Stream Presentation | Completed & Verified |
 | **Stage 7 Correction #21** | Session / Persistence State & Runtime Resume | Completed & Verified |
+| **Stage 7 Correction #22** | Provider Reliability & Normalized Error Protocol | Completed & Verified |
 
 ---
 
 ## 6. Artifact Ledger
 
+- `Phase_CLI_TUI_Stage_7_Correction_22.zip` (Current authoritative baseline)
 - `Phase_CLI_TUI_Stage_7_Correction_21.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_20.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_19.zip`

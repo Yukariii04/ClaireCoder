@@ -92,6 +92,17 @@ class ClaireCoderV1:
         self.bridge = EngineBridge(self.event_emitter)
         self.engineering_engine.subscribe(self.bridge.on_engine_event)
 
+        # Wire event emitter and reliability settings into gateway (Correction #22)
+        if hasattr(self.model_gateway, "set_event_emitter"):
+            self.model_gateway.set_event_emitter(self.event_emitter)
+        if hasattr(self.model_gateway, "retry_executor"):
+            rel_config = self.config_manager.get_reliability_config()
+            self.model_gateway.reliability_config = rel_config
+            self.model_gateway.retry_executor.config = rel_config
+            if hasattr(self.model_gateway, "health_tracker"):
+                self.model_gateway.health_tracker.failure_threshold = rel_config.failure_threshold_for_cooldown
+                self.model_gateway.health_tracker.cooldown_seconds = rel_config.cooldown_seconds
+
         self.agent_runtime = AgentRuntime(
             planner=self.planner,
             verifier=self.verification_engine,

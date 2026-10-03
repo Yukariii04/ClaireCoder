@@ -63,11 +63,21 @@ class ModelRequest:
 @dataclass
 class ModelResponse:
     text: Optional[str] = None
+    content: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     structured_output: Optional[Any] = None
     usage: Dict[str, int] = field(default_factory=dict)
     provider_specific: Dict[str, Any] = field(default_factory=dict)
     stream_generator: Optional[Any] = None
+    latency: Optional[float] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.text is None and self.content is not None:
+            self.text = self.content
+        elif self.content is None and self.text is not None:
+            self.content = self.text
 
 class ErrorCategory(str, Enum):
     AUTHENTICATION = "authentication"

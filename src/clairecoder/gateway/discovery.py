@@ -6,6 +6,15 @@ import urllib.error
 from typing import Any, Dict, List, Optional
 
 from .types import Model, Provider, Endpoint, Capability, ModelError, ErrorCategory
+from .errors import (
+    ProviderError,
+    ProviderTimeoutError,
+    ProviderConnectionError,
+    ProviderAuthenticationError,
+    ProviderRateLimitError,
+    ProviderUnavailableError,
+    ProviderResponseError,
+)
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -91,7 +100,11 @@ def _parse_http_error_body(e: urllib.error.HTTPError, provider_name: str) -> str
 
 
 def _http_get(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 15) -> Dict[str, Any]:
-    """Simple GET request returning parsed JSON with standard User-Agent."""
+    """Simple GET request returning parsed JSON with standard User-Agent and structured error mapping."""
+    if not url or not url.strip().startswith(("http://", "https://")):
+        raise ProviderConnectionError(
+            message=f"Invalid URL '{url}': must be an absolute URL starting with http:// or https://"
+        )
     hdrs = {
         "User-Agent": DEFAULT_USER_AGENT,
         "Accept": "application/json",
@@ -104,20 +117,43 @@ def _http_get(url: str, headers: Optional[Dict[str, str]] = None, timeout: int =
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         err_msg = _parse_http_error_body(e, "Provider")
-        category = ErrorCategory.AUTHENTICATION if e.code in (401, 403) else ErrorCategory.ENDPOINT_FAILURE
         try:
             e.close()
         except Exception:
             pass
-        raise ModelError(
-            category=category,
-            message=f"HTTP {e.code}: {err_msg}",
-        ) from None
+        if e.code in (401, 403):
+            raise ProviderAuthenticationError(
+                message=f"Authentication failed (HTTP {e.code}): {err_msg}",
+                status_code=e.code,
+            ) from None
+        elif e.code == 429:
+            raise ProviderRateLimitError(
+                message=f"Rate limited (HTTP 429): {err_msg}",
+            ) from None
+        elif e.code >= 500:
+            raise ProviderUnavailableError(
+                message=f"Provider unavailable (HTTP {e.code}): {err_msg}",
+                status_code=e.code,
+            ) from None
+        else:
+            raise ProviderResponseError(
+                message=f"HTTP {e.code}: {err_msg}",
+                status_code=e.code,
+            ) from None
+    except TimeoutError as te:
+        raise ProviderTimeoutError(
+            message=f"Request to {url} timed out after {timeout}s",
+            timeout_seconds=float(timeout),
+        ) from te
     except urllib.error.URLError as e:
-        raise ModelError(
-            category=ErrorCategory.NETWORK_FAILURE,
+        reason = getattr(e, "reason", None)
+        if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+            raise ProviderTimeoutError(
+                message=f"Request to {url} timed out after {timeout}s",
+                timeout_seconds=float(timeout),
+            ) from e
+        raise ProviderConnectionError(
             message=f"Network error connecting to {url}: {e.reason}",
-            is_recoverable=True,
         ) from None
 
 
@@ -166,7 +202,18 @@ def validate_provider(
     reg = PROVIDER_REGISTRY.get(provider_id, {})
     adapter = reg.get("adapter", AdapterType.OPENAI_COMPATIBLE)
     norm_key = normalize_credential(api_key)
-    ep = (endpoint or reg.get("default_endpoint", "")).rstrip("/")
+    raw_ep = (endpoint or reg.get("default_endpoint", "")).strip().rstrip("/")
+    if not raw_ep:
+        raise ProviderConnectionError(
+            message=f"Endpoint URL cannot be empty for provider '{provider_id}'",
+            provider=provider_id,
+        )
+    if not raw_ep.startswith(("http://", "https://")):
+        raise ProviderConnectionError(
+            message=f"Invalid endpoint URL '{raw_ep}' for provider '{provider_id}': must start with http:// or https://",
+            provider=provider_id,
+        )
+    ep = raw_ep
 
     if adapter == AdapterType.OLLAMA or provider_id == "ollama":
         url = f"{ep}/api/tags"
@@ -195,7 +242,7 @@ def validate_provider(
                 return True
             raise
     else:
-        # OpenAI-compatible (OpenAI, Groq, OpenRouter, LM Studio, vLLM, Custom)
+        # OpenAI-compatible (OpenAI, Groq, OpenRouter, LM Studio, vLLM, Custom, OmniRoute)
         url = ep if ep.endswith("/models") else f"{ep}/models"
         headers = {}
         if norm_key:
@@ -213,9 +260,18 @@ def discover_openai_compatible(
     extra_headers: Optional[Dict[str, str]] = None,
 ) -> List[Model]:
     """Discover models from an OpenAI-compatible /v1/models endpoint."""
-    url = endpoint.rstrip("/")
-    if not url.endswith("/models"):
-        url = f"{url}/models"
+    if not endpoint or not endpoint.strip():
+        raise ProviderConnectionError(
+            message=f"Endpoint URL cannot be empty for provider '{provider_id}'",
+            provider=provider_id,
+        )
+    clean_ep = endpoint.strip().rstrip("/")
+    if not clean_ep.startswith(("http://", "https://")):
+        raise ProviderConnectionError(
+            message=f"Invalid endpoint URL '{clean_ep}' for provider '{provider_id}': must start with http:// or https://",
+            provider=provider_id,
+        )
+    url = clean_ep if clean_ep.endswith("/models") else f"{clean_ep}/models"
 
     norm_key = normalize_credential(api_key)
     headers: Dict[str, str] = {}

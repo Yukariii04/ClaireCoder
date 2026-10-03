@@ -1506,3 +1506,60 @@
   - Complete test suite: **1001 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_21.zip`.
 - **Next Authorized Milestone**: Proceed to Correction #22.
+
+### 2026-10-04 — CLI / TUI Stage 7: Correction #22 (Provider Reliability)
+- **Status**: COMPLETED
+- **Goal**: Make LLM/provider execution reliable under real-world failures without changing the AgentRuntime architecture or adding provider-specific logic throughout the runtime.
+- **Architectural Enhancements**:
+  - **Structured Provider Error Model (`clairecoder.gateway.errors`)**:
+    - Created normalized error hierarchy subclassing `ModelError` for full backward compatibility: `ProviderError`, `ProviderTimeoutError`, `ProviderConnectionError`, `ProviderRateLimitError`, `ProviderAuthenticationError`, `ProviderUnavailableError`, `ProviderResponseError`, `ProviderInvalidOutputError`.
+    - Every error carries structured metadata: `provider`, `model`, `operation`, `retryable`, `status_code`, `error_code`, `retry_after`, and `to_dict()`.
+    - Sanitizes sensitive secrets via `sanitize_sensitive_data`: scrubs Bearer tokens, `Authorization: ...`, `api_key=...`, `x-api-key: ...`, query parameter `key=...`, and passwords from error messages, debug strings, dictionaries, and event payloads without secret leakage.
+  - **Normalized Provider Result Model (`clairecoder.gateway.types.ModelResponse`)**:
+    - Enhanced `ModelResponse` with `latency: Optional[float]`, `provider: Optional[str]`, and `model: Optional[str]` fields.
+    - Synchronized `text` and `content` fields via `__post_init__` to satisfy uniform content access without forcing callers to parse provider-specific raw objects.
+  - **Bounded Retry Policy with Exponential Backoff (`clairecoder.gateway.reliability`)**:
+    - `ReliabilityConfig`: Configurable `request_timeout` (60.0s), `max_retry_attempts` (3), `initial_retry_delay` (1.0s), `max_retry_delay` (30.0s), `backoff_factor` (2.0), `enable_cooldown` (True), `cooldown_seconds` (30.0s). Persisted at `.clairecoder/config/reliability.json`.
+    - `calculate_backoff_delay`: Exponential backoff calculation (`initial_delay * (factor ** (attempt - 1))`) strictly capped at `max_retry_delay`.
+    - `Retry-After` header extraction and support in HTTP 429 and 503/529 responses.
+    - Transient vs non-transient classification: connection errors, timeouts, 429, 503, and 5xx are retryable; 401/403, invalid requests, and deterministic schema invalidity are non-retryable.
+    - Injected `sleep_fn` and `time_fn` enable 100% deterministic, instant testing of retry loops.
+  - **Lightweight In-Memory Provider Health & Cooldown Tracking**:
+    - `ProviderHealthTracker`: Tracks consecutive failures per provider and imposes a bounded cooldown window upon reaching threshold.
+    - Avoids hammering dead or failing endpoints; calls during cooldown fail immediately with `ProviderUnavailableError`. Resets to healthy immediately on successful response.
+  - **Adapter Hardening & Endpoint Validation**:
+    - `OllamaAdapter`: Endpoint validation, `/api/chat` route normalization, explicit urllib timeout, HTTP error mapping, and rejection of HTTP 200 with missing message or empty content as structured `ProviderResponseError(status_code=200)`.
+    - `OpenAICompatibleAdapter`: Endpoint validation preventing relative URLs (such as `/models`) or empty URLs, explicit timeout validation, `Retry-After` header extraction, and structured error mapping.
+    - `AnthropicAdapter` & `GeminiAdapter`: Hardened with explicit timeouts, positive float validation, `Retry-After` parsing, and endpoint validation.
+    - `Discovery`: Discovered endpoints validate absolute HTTP/HTTPS format.
+  - **Structured Output Reliability vs Provider Failure**:
+    - Maintained clear distinction between transport/connection failure (`ProviderConnectionError`, `ProviderTimeoutError`) and post-response schema validation failure (`ProviderInvalidOutputError`).
+    - Valid output constructs `Plan`; invalid output follows existing structured planner fallback without creating conflicting planning mechanisms.
+  - **Runtime Event Protocol Integration (`clairecoder.runtime.events`)**:
+    - Added provider lifecycle event types: `PROVIDER_REQUEST_STARTED`, `PROVIDER_REQUEST_RETRYING`, `PROVIDER_REQUEST_COMPLETED`, `PROVIDER_REQUEST_FAILED`.
+    - Emitted with attempt number, duration, retryable status, sanitized error info, and correlation IDs (`run_id`).
+  - **Configuration Integration (`ConfigurationManager`)**:
+    - Added `get_reliability_config()` and `save_reliability_config()` to `ConfigurationManager` reading/writing `.clairecoder/config/reliability.json` with safe defaults.
+- **Files Created**:
+  - `src/clairecoder/gateway/errors.py`
+  - `src/clairecoder/gateway/reliability.py`
+  - `tests/gateway/test_provider_reliability.py`
+- **Files Modified**:
+  - `src/clairecoder/gateway/types.py`
+  - `src/clairecoder/gateway/adapters/ollama.py`
+  - `src/clairecoder/gateway/adapters/openai.py`
+  - `src/clairecoder/gateway/adapters/anthropic.py`
+  - `src/clairecoder/gateway/adapters/gemini.py`
+  - `src/clairecoder/gateway/gateway.py`
+  - `src/clairecoder/gateway/manager.py`
+  - `src/clairecoder/gateway/discovery.py`
+  - `src/clairecoder/runtime/events.py`
+  - `src/clairecoder/app.py`
+  - `memory.md`
+  - `update.md`
+- **Tests**:
+  - 37 new focused tests in `tests/gateway/test_provider_reliability.py` covering error mapping, retries, backoff, Retry-After, timeouts, endpoints, Ollama safety, structured output, events, secret scrubbing, and health cooldowns.
+  - Gateway suite: **83 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
+  - Complete workspace test suite: **1038 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
+- **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_22.zip`.
+- **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning next phase.
