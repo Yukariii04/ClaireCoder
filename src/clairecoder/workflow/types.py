@@ -263,6 +263,18 @@ class Plan:
     # Maps task_id → dict with keys like title, description, type, inputs, etc.
     task_details: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
+    @property
+    def tasks(self) -> List[Dict[str, Any]]:
+        """Correction #15: Return structured task records for TaskGraph construction."""
+        records: List[Dict[str, Any]] = []
+        for tid in self.task_ids:
+            details = dict(self.task_details.get(tid, {}))
+            details["id"] = tid
+            if "dependencies" not in details or not details["dependencies"]:
+                details["dependencies"] = list(self.dependencies.get(tid, []))
+            records.append(details)
+        return records
+
 
 # =============================================================================
 # ERRORS

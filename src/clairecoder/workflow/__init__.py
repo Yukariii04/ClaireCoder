@@ -24,7 +24,7 @@ from .types import (
     TaskGraphError,
 )
 from .manager import WorkflowManager
-from .planner import Planner
+from .planner import Planner, PLAN_SCHEMA, validate_plan, parse_structured_plan
 from .task_graph import TaskGraph
 from .dependencies import (
     validate_dependencies,
@@ -50,6 +50,9 @@ __all__ = [
     "TaskGraphError",
     "WorkflowManager",
     "Planner",
+    "PLAN_SCHEMA",
+    "validate_plan",
+    "parse_structured_plan",
     "TaskGraph",
     "validate_dependencies",
     "topological_order",

@@ -465,13 +465,37 @@ class TaskGraph:
         event_emitter: Optional[Any] = None,
         run_id: Optional[str] = None,
     ) -> "TaskGraph":
-        """Create and finalize a TaskGraph directly from a Plan artifact."""
-        from .planner import Planner
+        """Create and finalize a TaskGraph directly from a Plan artifact or task list.
 
-        planner = Planner()
-        tasks = planner.create_tasks_from_plan(
-            plan, objective_id=objective_id or getattr(plan, "workflow_id", "")
-        )
+        Correction #15: Supports both Plan objects and plan.tasks lists.
+        """
+        from .planner import Planner
+        from .types import Plan, PlanningLevel
+
+        tasks: List[Task] = []
+        if isinstance(plan, list):
+            planner = Planner()
+            for item in plan:
+                if isinstance(item, Task):
+                    tasks.append(item)
+                elif isinstance(item, dict):
+                    tid = str(item.get("id") or item.get("task_id") or "")
+                    single_plan = Plan(
+                        id=f"plan_item_{tid}",
+                        workflow_id=objective_id,
+                        objective="",
+                        planning_level=PlanningLevel.STRUCTURED,
+                        task_ids=[tid],
+                        dependencies={tid: item.get("dependencies", [])},
+                        task_details={tid: item},
+                    )
+                    tasks.extend(planner.create_tasks_from_plan(single_plan, objective_id=objective_id))
+        else:
+            planner = Planner()
+            tasks = planner.create_tasks_from_plan(
+                plan, objective_id=objective_id or getattr(plan, "workflow_id", "")
+            )
+
         graph = cls(
             event_callback=event_callback,
             event_emitter=event_emitter,

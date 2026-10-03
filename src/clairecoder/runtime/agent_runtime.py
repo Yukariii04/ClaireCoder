@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from clairecoder.workflow.types import (
     Plan,
+    PlanningError,
     PlanningLevel,
     Task,
     TaskState,
@@ -185,6 +186,20 @@ class AgentRuntime:
             active_model=active_model,
             provided_graph=task_graph,
         )
+
+        if plan is None and task_graph is None and graph.has_failures():
+            # Planning failed fatally before execution started
+            if self._workflow_manager:
+                wf = self._workflow_manager.get_workflow(workflow_id)
+                if wf and wf.state == WorkflowState.CREATED:
+                    self._workflow_manager.transition_state(workflow_id, WorkflowState.CANCELLED)
+            return self._build_result(
+                success=False,
+                run_id=run_id,
+                objective_id=objective_id,
+                graph=graph,
+                failure_reason=graph.tasks[0].description if graph.tasks else "Planning failed",
+            )
 
         # 3. Main Agent Execution Loop
         cycles = 0
@@ -476,23 +491,63 @@ class AgentRuntime:
 
         model_resp = None
         if self._engineering_engine and active_model:
+            use_structured = True
+            if self._model_gateway and hasattr(self._model_gateway, "check_capability"):
+                from clairecoder.gateway.types import Capability
+                try:
+                    use_structured = (
+                        self._model_gateway.check_capability(active_model, Capability.STRUCTURED_OUTPUT)
+                        or self._model_gateway.check_capability(active_model, Capability.JSON_SCHEMA)
+                    )
+                except Exception:
+                    use_structured = True
+
             req = self._planner.build_planning_request(
                 objective=objective_req,
                 planning_level=PlanningLevel.STRUCTURED,
                 context_summary="Planning phase",
                 model_id=active_model,
+                use_structured_output=use_structured,
             )
             try:
                 model_resp = self._engineering_engine.execute_model(req)
             except Exception:
                 model_resp = None
 
-        plan = self._planner.create_plan(
-            workflow_id=workflow_id,
-            objective=objective_req,
-            planning_level=PlanningLevel.STRUCTURED,
-            model_response=model_resp,
-        )
+        try:
+            plan = self._planner.create_plan(
+                workflow_id=workflow_id,
+                objective=objective_req,
+                planning_level=PlanningLevel.STRUCTURED,
+                model_response=model_resp,
+            )
+        except PlanningError as pe:
+            self._emit(
+                EventType.RUN_FAILED,
+                run_id=run_id,
+                objective_id=objective_id,
+                payload={
+                    "run_id": run_id,
+                    "objective_id": objective_id,
+                    "reason": f"Planning failed: {pe}",
+                    "failed_tasks": [],
+                    "blocked_tasks": [],
+                },
+            )
+            graph = TaskGraph(event_emitter=self._event_emitter, run_id=run_id)
+            failed_task = Task(
+                id=f"plan_failure_{run_id[-6:]}",
+                objective_id=objective_id,
+                title="Planning Failure",
+                description=f"Planning failed: {pe}",
+                type=TaskType.ANALYSIS,
+                status=TaskState.FAILED,
+                failure_evidence=[{"error": f"Planning failed: {pe}"}],
+            )
+            graph.add_task(failed_task)
+            graph.finalize()
+            return graph, None
+
 
         # Propagate plan completion criteria & validation strategy into workflow
         if wf:
@@ -680,8 +735,12 @@ class AgentRuntime:
     ) -> Tuple[Optional[TaskGraph], Optional[Plan]]:
         """Execute replanning when failures occur within replan budget."""
         if self._workflow_manager:
-            self._workflow_manager.transition_state(workflow_id, WorkflowState.FAILED)
-            self._workflow_manager.transition_state(workflow_id, WorkflowState.REPLANNING)
+            wf = self._workflow_manager.get_workflow(workflow_id)
+            if wf and wf.state in (WorkflowState.ACTIVE, WorkflowState.VALIDATING):
+                self._workflow_manager.transition_state(workflow_id, WorkflowState.FAILED)
+                self._workflow_manager.transition_state(workflow_id, WorkflowState.REPLANNING)
+            elif wf and wf.state == WorkflowState.FAILED:
+                self._workflow_manager.transition_state(workflow_id, WorkflowState.REPLANNING)
 
         # Emit replanning started
         self._emit(
@@ -720,24 +779,41 @@ class AgentRuntime:
 
         model_resp = None
         if self._engineering_engine and active_model:
+            use_structured = True
+            if self._model_gateway and hasattr(self._model_gateway, "check_capability"):
+                from clairecoder.gateway.types import Capability
+                try:
+                    use_structured = (
+                        self._model_gateway.check_capability(active_model, Capability.STRUCTURED_OUTPUT)
+                        or self._model_gateway.check_capability(active_model, Capability.JSON_SCHEMA)
+                    )
+                except Exception:
+                    use_structured = True
+
             req = self._planner.build_replan_request(
                 objective=objective_req,
                 previous_plan=current_plan,
                 failure_reason=failure_reason,
                 context_summary="Replanning phase",
                 model_id=active_model,
+                use_structured_output=use_structured,
             )
             try:
                 model_resp = self._engineering_engine.execute_model(req)
             except Exception:
                 model_resp = None
 
-        new_plan = self._planner.create_plan(
-            workflow_id=workflow_id,
-            objective=objective_req,
-            planning_level=PlanningLevel.STRUCTURED,
-            model_response=model_resp,
-        )
+        try:
+            new_plan = self._planner.create_plan(
+                workflow_id=workflow_id,
+                objective=objective_req,
+                planning_level=PlanningLevel.STRUCTURED,
+                model_response=model_resp,
+                strict=True if model_resp is not None else False,
+            )
+        except PlanningError:
+            return None, None
+
 
         new_tasks = self._planner.create_tasks_from_plan(new_plan, objective_id)
         if not new_tasks:

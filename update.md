@@ -1101,4 +1101,61 @@
     13. `ClaireCoderV1.run()` delegation to `AgentRuntime`.
   - Full test suite: **828 passed, 0 skipped, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_14.zip`.
-- **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning Correction #15.
+- **Next Authorized Milestone**: Stage 7 Correction #15.
+
+### 2026-10-03 — CLI / TUI Stage 7 Correction #15: Structured Planner
+- **Status**: Completed
+- **Objective**: Transform the planner from relying on free-form model text and crude JSON extraction into a schema-driven structured output pipeline using `ModelRequest.structured_output_schema`, explicit plan validation before `TaskGraph` construction, safe provider fallback, task metadata preservation, and compact DAG dependency prompting.
+- **Implementation**:
+  - **Structured Plan Contract (`PLAN_SCHEMA`)**:
+    - Defined standard JSON schema matching top-level fields: `assumptions`, `affected_areas`, `risks`, `validation_strategy`, `completion_criteria`, and `tasks`.
+    - Defined per-task schema fields: `id`, `title`, `description`, `type` (enum), `dependencies`, `inputs`, `expected_outputs`, `validation`.
+    - Integrated with existing `Plan`, `Task`, `TaskType`, and `TaskGraph` domain models without introducing any duplicate task classes.
+  - **Structured Output Pipeline & Provider Compatibility**:
+    - Updated `Planner.build_planning_request()` and `build_replan_request()` to populate `ModelRequest.structured_output_schema = PLAN_SCHEMA` when `use_structured_output=True`.
+    - Configured runtime capability checks (`Capability.STRUCTURED_OUTPUT`, `Capability.JSON_SCHEMA`) in `AgentRuntime` before building requests; providers without structured output capability use the explicit fallback path.
+  - **Strict Plan Validation (`validate_plan`)**:
+    - Validates mapping structure, required top-level fields, non-empty and unique task IDs, valid task types, existing dependency references, self-dependency prevention, and dependency cycles before constructing the graph.
+    - Added `parse_structured_plan(response, strict=True)` to handle both native structured output and textual fallback.
+  - **Safe Fallback Behavior**:
+    - Textual responses with markdown fenced JSON (````json ... ````) or outermost JSON structures are parsed and validated strictly; malformed JSON or invalid task fields raise `PlanningError` with clear evidence rather than generating a minimal fake plan.
+    - Minimal scaffold is strictly preserved for direct execution (`PlanningLevel.DIRECT`) and when no model response is provided.
+  - **Task Metadata Preservation**:
+    - All rich fields (`title`, `description`, `type`, `dependencies`, `inputs`, `expected_outputs`, `validation`, `metadata`) are preserved through `Planner -> Plan -> TaskGraph`.
+    - Added `Plan.tasks` property and enhanced `TaskGraph.from_plan()` to support both `Plan` objects and task list representations.
+  - **Compact DAG Prompting**:
+    - System prompts include a compact dependency DAG example (`task-1 -> task-2 -> task-3`, `task-1 -> task-4`) and clear instructions that dependencies must reference task IDs.
+  - **AgentRuntime Lifecycle Robustness**:
+    - `AgentRuntime._initialize_task_graph` catches `PlanningError` and cleanly emits `RUN_FAILED` with structured evidence instead of crashing or attempting replans on unconstructible graphs.
+    - Protected workflow state transitions in `_replan` to prevent illegal transitions from un-activated workflows.
+- **Files Modified**:
+  - `src/clairecoder/workflow/planner.py`
+  - `src/clairecoder/workflow/__init__.py`
+  - `src/clairecoder/workflow/types.py`
+  - `src/clairecoder/workflow/task_graph.py`
+  - `src/clairecoder/runtime/agent_runtime.py`
+  - `memory.md`
+  - `update.md`
+- **Files Created**:
+  - `tests/workflow/test_structured_planner.py`
+- **Tests**:
+  - 16 new tests in `tests/workflow/test_structured_planner.py` covering:
+    1. Planning request contains `structured_output_schema` and compact DAG example.
+    2. Schema contains all expected top-level and task fields.
+    3. Valid structured response creates a rich `Plan`.
+    4. Task metadata survives planner -> Plan -> TaskGraph (and via `TaskGraph.from_plan(plan.tasks)`).
+    5. Duplicate task IDs are rejected with `PlanningError`.
+    6. Empty task IDs are rejected with `PlanningError`.
+    7. Unknown dependencies are rejected with `PlanningError`.
+    8. Self-dependencies are rejected with `PlanningError`.
+    9. Malformed task objects are rejected with `PlanningError`.
+    10. Invalid task types are rejected with `PlanningError`.
+    11. Provider without structured-output capability uses fallback.
+    12. Malformed fallback output produces a `PlanningError`.
+    13. Replan request builds valid `ModelRequest` with schema and failure context.
+    14. Existing planner behavior remains compatible for direct planning.
+    15. Runtime capability checks and fallback execution.
+    16. Runtime emits `RUN_FAILED` and halts cleanly on `PlanningError`.
+  - Full test suite: **844 passed, 0 skipped, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
+- **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_15.zip`.
+- **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning Correction #16.

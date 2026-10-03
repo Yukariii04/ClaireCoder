@@ -7,7 +7,7 @@ name = "clairecoder"
 version = "0.1.0"
 description = "ClaireCoder V1 - An autonomous coding agent"
 authors = [
-    {name = "ClaireCoder Team"}
+    {name = "Yukariii"}
 ]
 readme = "README.md"
 requires-python = ">=3.10"

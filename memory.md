@@ -154,8 +154,8 @@ RFD (9 docs) → RES (8 docs) → ADR (6 docs) → PRD (10 docs) → IMPLEMENTAT
   - **Test Suite Pass Rate**: 656 passed, 0 skipped, 0 failures, 0 errors, 0 warnings (`pytest -W error`).
 
 ### Current State
-- **Active Stage**: Stage 7 Correction #13 Completed and Verified.
-- **Next Steps**: Await user testing feedback and audit before proceeding to next milestones.
+- **Active Stage**: Stage 7 Correction #15 Completed and Verified.
+- **Next Steps**: Await user testing feedback and authorization before proceeding to Correction #16.
 
 ### Phase Status
 - **Phase 1-12**: Completed and Approved.
@@ -177,12 +177,13 @@ RFD (9 docs) → RES (8 docs) → ADR (6 docs) → PRD (10 docs) → IMPLEMENTAT
 - **CLI / TUI Stage 7 Correction #12 (Structured Runtime Event Protocol + EventEmitter + Bridge + TUI Listener)**: Completed and Verified.
 - **CLI / TUI Stage 7 Correction #13 (Structured Task Graph + Semantic Task Model + Dependency Resolution + Failure Propagation + Attempt Tracking + Planner Preservation)**: Completed and Verified.
 - **CLI / TUI Stage 7 Correction #14 (Agent Runtime Extraction + Decoupled Execution Lifecycle + Thin App + Clean Failure & Verification Boundaries + Non-Contradictory State Machine)**: Completed and Verified.
+- **CLI / TUI Stage 7 Correction #15 (Structured Planner + Schema-Driven ModelRequest + Compact DAG Prompting + Strict Plan Validation + Safe Provider Fallback + Task Metadata Preservation)**: Completed and Verified.
 
 ### Recent Artifacts
+- `Phase_CLI_TUI_Stage_7_Correction_15.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_14.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_13.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_12.zip`
-- `Phase_CLI_TUI_Stage_7_Correction_11.zip`
 
 ### Documentation Baseline Lock (2026-08-18)
 - **Status**: All 9 authoritative frontend documents finalized to FINAL.
