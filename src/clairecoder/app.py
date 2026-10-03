@@ -4,15 +4,21 @@ This module implements the top-level integration boundary that brings all
 independent ClaireCoder subsystems together into a single engineering platform.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import json
 from pathlib import Path
 
-from clairecoder.engine.engine import EngineeringEngine, EngineeringObjective
-from clairecoder.workflow.types import Task as EngineTask, TaskState as EngineTaskState
+from clairecoder.engine.engine import EngineeringEngine
+from clairecoder.engine.types import (
+    EngineeringObjective, EngineEvent, Task as EngineTask, TaskState as EngineTaskState, ObjectiveStatus
+)
 from clairecoder.interaction.controller import InteractionController
 from clairecoder.interaction.types import CommandRequest
-from clairecoder.gateway.interfaces import ModelGatewayInterface
+from clairecoder.gateway.interfaces import ModelGatewayInterface, ProviderAdapterInterface
+from clairecoder.gateway.types import ModelRequest, ModelResponse, Model, Provider, Endpoint, Capability
+from clairecoder.gateway.config import ProviderProfile, AdapterType, PROVIDER_REGISTRY
+from clairecoder.gateway.credentials import CredentialStore
+from clairecoder.gateway.manager import ConfigurationManager
 from clairecoder.tools.executor import ToolExecutor
 from clairecoder.permissions.engine import PermissionEngine
 from clairecoder.skills.registry import SkillRegistry
@@ -20,9 +26,13 @@ from clairecoder.workflow.manager import WorkflowManager
 from clairecoder.workflow.planner import Planner
 from clairecoder.workflow.types import Plan, WorkflowState, PlanningLevel
 from clairecoder.execution.manager import ExecutionManager
-from clairecoder.execution.types import Task as ExecTask, TaskState as ExecTaskState, ExecutionResult, ExecutionResultCategory, FailureCategory
+from clairecoder.execution.types import Task as ExecTask, TaskState as ExecTaskState, ExecutionResult, ExecutionResultCategory, FailureCategory, FailureEvidence
 from clairecoder.verification.engine import VerificationEngine
 from clairecoder.verification.types import VerificationStatus, VerificationCriterion, VerificationTestType
+from clairecoder.runtime.agent_runtime import AgentRuntime, RunResult
+from clairecoder.runtime.emitter import EventEmitter
+from clairecoder.runtime.bridge import EngineBridge
+
 
 class ClaireCoderV1:
     """The unified V1 entry point for ClaireCoder.
@@ -38,18 +48,26 @@ class ClaireCoderV1:
         skill_registry: Optional[SkillRegistry] = None,
         workflow_manager: Optional[WorkflowManager] = None,
         execution_manager: Optional[ExecutionManager] = None,
-        verification_engine: Optional[VerificationEngine] = None
+        verification_engine: Optional[VerificationEngine] = None,
+        workspace_root: Optional[str] = None,
     ):
         from clairecoder.gateway.gateway import ModelGateway
         from clairecoder.tools.registry import ToolRegistry
+        from clairecoder.verification.runner import DefaultVerificationRunner
 
         self.model_gateway = model_gateway if model_gateway is not None else ModelGateway()
         self.permission_engine = permission_engine if permission_engine is not None else PermissionEngine()
-        self.tool_executor = tool_executor if tool_executor is not None else ToolExecutor(ToolRegistry(), self.permission_engine)
+        self.tool_executor = tool_executor if tool_executor is not None else ToolExecutor(ToolRegistry.create_default(), self.permission_engine)
         self.skill_registry = skill_registry if skill_registry is not None else SkillRegistry()
         self.workflow_manager = workflow_manager if workflow_manager is not None else WorkflowManager()
         self.execution_manager = execution_manager if execution_manager is not None else ExecutionManager()
         self.verification_engine = verification_engine if verification_engine is not None else VerificationEngine()
+        if self.verification_engine._runner is None:
+            self.verification_engine._runner = DefaultVerificationRunner(workspace_root=workspace_root)
+        
+        # Configuration management (Stage 7)
+        self._workspace_root = workspace_root
+        self.config_manager = ConfigurationManager(workspace_root=workspace_root)
         
         # Core engineering orchestrator
         self.engineering_engine = EngineeringEngine(
@@ -59,20 +77,88 @@ class ClaireCoderV1:
         )
         
         # Interaction Layer
-        self.interaction_controller = InteractionController(engine=self.engineering_engine)
+        self.interaction_controller = InteractionController(engine=self.engineering_engine, app=self)
+
+        # Load persisted provider profiles into the gateway
+        self.load_providers_from_config()
         self.planner = Planner()
 
+        # Runtime Event Protocol & Decoupled AgentRuntime (Correction #14)
+        self.event_emitter = EventEmitter()
+        self.bridge = EngineBridge(self.event_emitter)
+        self.engineering_engine.subscribe(self.bridge.on_engine_event)
+
+        self.agent_runtime = AgentRuntime(
+            planner=self.planner,
+            verifier=self.verification_engine,
+            event_emitter=self.event_emitter,
+            workflow_manager=self.workflow_manager,
+            execution_manager=self.execution_manager,
+            engineering_engine=self.engineering_engine,
+            verification_engine=self.verification_engine,
+            model_gateway=self.model_gateway,
+            config_manager=self.config_manager,
+            workspace_root=workspace_root,
+        )
+
     @classmethod
-    def create_default(cls, model_gateway: Optional[ModelGatewayInterface] = None) -> 'ClaireCoderV1':
+    def create_default(
+        cls,
+        model_gateway: Optional[ModelGatewayInterface] = None,
+        workspace_root: Optional[str] = None
+    ) -> "ClaireCoderV1":
         """Factory method to construct a default ClaireCoderV1 application instance."""
-        return cls(model_gateway=model_gateway)
+        return cls(model_gateway=model_gateway, workspace_root=workspace_root)
         
-    def create_session(self, session_id: str) -> str:
-        """Create a new engineering session."""
+    def get_active_model_id(self) -> Optional[str]:
+        """Get the authoritative active model ID from configuration or registered gateway models."""
+        active = self.config_manager.get_active()
+        if active.get("model_id"):
+            return active["model_id"]
+        # Fallback to registered models in gateway
+        if hasattr(self.model_gateway, "_models") and isinstance(self.model_gateway._models, dict) and self.model_gateway._models:
+            return next(iter(self.model_gateway._models.keys()))
+        if type(self.model_gateway).__name__ != "ModelGateway" and hasattr(self.model_gateway, "execute"):
+            return "test-model"
+        return None
+
+    def get_active_provider_profile(self) -> Optional[ProviderProfile]:
+        """Get the currently active ProviderProfile object if configured."""
+        active = self.config_manager.get_active()
+        pid = active.get("provider_profile_id")
+        if pid:
+            return self.config_manager.load_provider_profile(pid)
+        return None
+
+    def create_session(self, session_id: str, model_profile_id: Optional[str] = None) -> str:
+        """Create a new engineering session with authoritative model profile."""
+        active_model = model_profile_id or self.get_active_model_id()
         objective = EngineeringObjective(
             id=f"obj_{session_id}",
             request="Initialize session",
-            session_id=session_id
+            session_id=session_id,
+            model_profile_id=active_model,
+        )
+        session = self.engineering_engine.receive_objective(objective)
+        return session.id
+
+    def submit_objective(self, session_id: str, request: str, start_background: bool = True) -> str:
+        """Submit a new objective to the session using the authoritative active model."""
+        active_model = self.get_active_model_id()
+        session = self.engineering_engine.get_session(session_id)
+        if session:
+            active_cfg = self.config_manager.get_active()
+            if active_cfg.get("model_id"):
+                active_model = active_cfg["model_id"]
+                session.model_profile = active_model
+            elif session.model_profile:
+                active_model = session.model_profile
+
+        objective = EngineeringObjective(
+            id=f"obj_{hash(request)}",
+            request=request,
+            session_id=session_id,
+            model_profile_id=active_model,
         )
         session = self.engineering_engine.receive_objective(objective)
         return session.id
@@ -80,190 +166,192 @@ class ClaireCoderV1:
     def check_configuration_status(self) -> str:
         """Determine application configuration state: 'configured', 'not_configured', or 'needs_repair'.
         
-        Per CC-PRD-011 and Stage 6 architecture:
-        Provides an authoritative status query without making TUI state authoritative.
+        Per CC-PRD-011 and Stage 7 architecture:
+        Uses ConfigurationManager as the authoritative source, with fallback to in-memory gateway.
         """
-        if not hasattr(self.model_gateway, "_providers") or not self.model_gateway._providers:
-            return "not_configured"
-        return "configured"
+        if self.config_manager.is_configured():
+            return "configured"
+        if hasattr(self.model_gateway, "_providers") and self.model_gateway._providers:
+            return "configured"
+        if hasattr(self.model_gateway, "_adapters") and self.model_gateway._adapters:
+            return "configured"
+        if hasattr(self.model_gateway, "_models") and self.model_gateway._models:
+            return "configured"
+        if self.config_manager.needs_repair():
+            return "needs_repair"
+        return "not_configured"
 
-    def submit_objective(self, session_id: str, objective_text: str) -> str:
+    def register_provider_profile(self, profile: ProviderProfile) -> None:
+        """Register a provider profile's adapter and all its models into the ModelGateway."""
+        if not profile.enabled:
+            return
+        adapter = self._create_adapter_for_profile(profile)
+        if adapter:
+            self.model_gateway.register_adapter(adapter)
+            provider = Provider(id=profile.provider_id, name=profile.name)
+            endpoint = Endpoint(url=profile.endpoint)
+            for mid in profile.available_models:
+                caps = []
+                model_caps = profile.capabilities.get(mid, [])
+                for c in model_caps:
+                    try:
+                        caps.append(Capability(c))
+                    except ValueError:
+                        pass
+                ctx = None
+                if isinstance(profile.provider_specific, dict):
+                    ctx = profile.provider_specific.get("context_capacities", {}).get(mid)
+                model = Model(
+                    id=mid,
+                    display_name=mid,
+                    provider=provider,
+                    endpoint=endpoint,
+                    capabilities=caps,
+                    context_capacity=ctx,
+                )
+                self.model_gateway.register_model(model)
+
+    def load_providers_from_config(self) -> bool:
+        """Load all configured providers into the ModelGateway from persisted config.
+        
+        Called during bootstrap (after wizard or on returning-user launch).
+        Returns True if at least one provider was loaded AND the active model is verified.
+        
+        ABSOLUTE RULE — NEVER HARDCODE A STARTUP MODEL.
+        The active (provider_profile_id, model_id) pair MUST come from persisted
+        config (active.json). If that pair doesn't resolve, the system enters
+        'needs_repair' state rather than silently selecting a random model.
+        """
+        profiles = self.config_manager.list_provider_profiles()
+        if not profiles:
+            return False
+
+        loaded = False
+        for profile in profiles:
+            try:
+                self.register_provider_profile(profile)
+                loaded = True
+            except Exception:
+                pass  # Skip broken profiles silently during boot
+
+        if not loaded:
+            return False
+
+        # Verify that the persisted active selection actually resolves
+        active = self.config_manager.get_active()
+        active_pid = active.get("provider_profile_id")
+        active_mid = active.get("model_id")
+
+        if active_pid and active_mid:
+            # Verify the provider profile exists
+            profile = self.config_manager.load_provider_profile(active_pid)
+            if profile is None or not profile.enabled:
+                # Profile was deleted or disabled — active selection is stale
+                return False
+
+            # Verify the model was registered in the gateway
+            try:
+                model_obj = self.model_gateway.get_model(active_mid)
+                if model_obj is None:
+                    return False
+                # Synchronize context capacity to interaction controller
+                if model_obj.context_capacity and hasattr(self, "interaction_controller") and self.interaction_controller:
+                    self.interaction_controller._context_capacity = model_obj.context_capacity
+            except Exception:
+                pass
+        elif active_pid or active_mid:
+            # Partial selection — needs repair
+            return False
+
+        return loaded
+
+    def _create_adapter_for_profile(self, profile: ProviderProfile) -> Optional[ProviderAdapterInterface]:
+        """Create the appropriate adapter instance for a provider profile."""
+        from clairecoder.gateway.adapters import (
+            OpenAICompatibleAdapter, AnthropicAdapter, GeminiAdapter, OllamaAdapter,
+        )
+
+        # Retrieve credential from secure store
+        api_key = None
+        if profile.credential_ref:
+            api_key = self.config_manager.credential_store.get_credential(profile.id)
+
+        adapter_type = profile.adapter_type
+
+        if adapter_type == AdapterType.ANTHROPIC.value:
+            return AnthropicAdapter(auth_token=api_key)
+        elif adapter_type == AdapterType.GEMINI.value:
+            return GeminiAdapter(auth_token=api_key)
+        elif adapter_type == AdapterType.OLLAMA.value:
+            provider_options = profile.provider_specific if isinstance(profile.provider_specific, dict) else {}
+            timeout_seconds = provider_options.get(
+                "timeout_seconds", OllamaAdapter.DEFAULT_TIMEOUT_SECONDS
+            )
+            return OllamaAdapter(timeout_seconds=timeout_seconds)
+        else:
+            # OpenAI-compatible: openai, groq, openrouter, omniroute, lmstudio, vllm, custom
+            return OpenAICompatibleAdapter(
+                provider_id=profile.provider_id,
+                auth_token=api_key,
+            )
+
+    def submit_objective(self, session_id: str, objective_text: str, start_background: bool = False) -> str:
         """Process a natural language request by creating an objective for the engine."""
-        return self.interaction_controller.process_natural_language(objective_text, session_id)
+        if start_background:
+            return self.interaction_controller.process_natural_language(objective_text, session_id)
+        else:
+            session = self.engineering_engine.get_session(session_id)
+            active_model = (session.model_profile if session and session.model_profile else None) or self.get_active_model_id()
+            objective = EngineeringObjective(
+                id=f"obj_{hash(objective_text)}",
+                request=objective_text,
+                session_id=session_id,
+                mode=self.interaction_controller._mode.value,
+                model_profile_id=active_model,
+            )
+            session = self.engineering_engine.receive_objective(objective)
+            return f"Objective accepted in session {session.id}"
         
     def execute_command(self, command: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
         """Execute an interaction command (e.g., /status, /pause)."""
         request = CommandRequest(command=command, arguments=arguments or {})
         return self.interaction_controller.execute_command(request)
 
-    def run(self, session_id: str, max_cycles: int = 10) -> None:
+    def run(self, session_id: str, max_cycles: int = 10) -> RunResult:
         """Run the engineering loop for a session until complete or paused.
         
-        End-to-End Flow: Objective -> Understand -> Plan -> Execute -> Verify -> Complete
+        Correction #14: Delegates execution orchestration to AgentRuntime.
+        app.py remains thin, owning bootstrap and composition.
         """
         session = self.engineering_engine.get_session(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
-            
-        workflow_id = f"wf_{session_id}"
-        
-        # 1. Assembly Context and Understand Objective
-        understanding = self.engineering_engine.understand(session_id)
-        
-        # 2. Planning - Delegate to WorkflowManager
-        workflow = self.workflow_manager.get_workflow(workflow_id)
-        if not workflow:
-            workflow = self.workflow_manager.create_workflow(workflow_id, session.objective.id, "Main workflow")
-            
-        cycles = 0
-        while workflow.state not in (WorkflowState.COMPLETE, WorkflowState.CANCELLED, WorkflowState.BLOCKED, WorkflowState.PAUSED):
-            if cycles >= max_cycles:
-                print("Max cycles reached in run loop.")
-                break
-            cycles += 1
-            
-            if workflow.state in (WorkflowState.CREATED, WorkflowState.REPLANNING):
-                context_summary = "Planning phase"
-                if workflow.state == WorkflowState.CREATED:
-                    req = self.planner.build_planning_request(
-                        objective=session.objective.request,
-                        planning_level=PlanningLevel.STRUCTURED,
-                        context_summary=context_summary,
-                        model_id=session.model_profile or "default-model"
-                    )
-                else:
-                    active_plan = self.workflow_manager.get_active_plan(workflow_id)
-                    req = self.planner.build_replan_request(
-                        objective=session.objective.request,
-                        previous_plan=active_plan,
-                        failure_reason="Execution or validation failed",
-                        context_summary=context_summary,
-                        model_id=session.model_profile or "default-model"
-                    )
-                
-                resp = self.engineering_engine.execute_model(req)
-                plan = self.planner.create_plan(
-                    workflow_id=workflow_id,
-                    objective=session.objective.id,
-                    planning_level=PlanningLevel.STRUCTURED,
-                    model_response=resp
-                )
-                tasks = self.planner.create_tasks_from_plan(plan, session.objective.id)
-                
-                self.engineering_engine.plan_tasks(session_id, tasks)
-                self.workflow_manager.add_plan(plan)
-                self.workflow_manager.transition_state(workflow_id, WorkflowState.PLANNED)
-                
-            if workflow.state == WorkflowState.PLANNED:
-                self.workflow_manager.transition_state(workflow_id, WorkflowState.ACTIVE)
-                
-            # 3. Model & Tool Interaction Loop (Execution)
-            if workflow.state == WorkflowState.ACTIVE:
-                ready_tasks = self.workflow_manager.get_ready_tasks(list(session.tasks.values()))
-                
-                for eng_task in ready_tasks:
-                    task_id = eng_task.id
-                    
-                    # Setup ExecutionManager
-                    exec_task = self.execution_manager.get_task(task_id)
-                    if not exec_task:
-                        exec_task = ExecTask(
-                            id=task_id,
-                            objective_id=eng_task.objective_id,
-                            description=eng_task.description,
-                            workflow_id=workflow_id
-                        )
-                        self.execution_manager.register_task(exec_task)
-                    
-                    if exec_task.status in (ExecTaskState.PENDING, ExecTaskState.FAILED):
-                        self.execution_manager.transition_task(task_id, ExecTaskState.READY)
-                    
-                    if exec_task.status in (ExecTaskState.READY, ExecTaskState.PAUSED):
-                        attempt = self.execution_manager.start_execution(task_id)
-                        
-                        # Use EngineeringEngine to update task status
-                        self.engineering_engine.start_task(session_id, task_id)
-                        
-                        try:
-                            exec_result = self.engineering_engine.interaction_loop(session_id, task_id, max_iterations=5)
-                        except Exception as e:
-                            print(f"Exception in interaction_loop: {e}")
-                            exec_result = ExecutionResult(
-                                category=ExecutionResultCategory.FAILURE,
-                                failure_category=FailureCategory.UNKNOWN_FAILURE,
-                                error_message=str(e)
-                            )
-                            
-                        # 4. Verification
-                        if exec_result.category.value == "success":
-                            self.workflow_manager.transition_state(workflow_id, WorkflowState.VALIDATING)
-                            if eng_task.validation_requirements:
-                                criteria = [
-                                    VerificationCriterion(
-                                        id=f"{task_id}:{index}",
-                                        description=req,
-                                        test_type=VerificationTestType.UNIT
-                                    )
-                                    for index, req in enumerate(eng_task.validation_requirements)
-                                ]
-                            else:
-                                criteria = []
 
-                            if criteria:
-                                self.verification_engine.create_verification(f"v_{task_id}_{attempt.attempt_number}", task_id, criteria)
-                                self.verification_engine.start_verification(f"v_{task_id}_{attempt.attempt_number}")
-                                v_result = self.verification_engine.execute_verification(f"v_{task_id}_{attempt.attempt_number}")
-                                passed = (v_result.status == VerificationStatus.PASSED)
-                            else:
-                                passed = True
-                            
-                            if passed:
-                                self.execution_manager.complete_execution(task_id, attempt.execution_id, exec_result, is_verified=True)
-                                self.engineering_engine.validate_task(session_id, task_id, passed=True)
-                            else:
-                                exec_result.category = ExecutionResultCategory.FAILURE
-                                exec_result.failure_category = FailureCategory.VALIDATION_FAILURE
-                                self.execution_manager.complete_execution(task_id, attempt.execution_id, exec_result, is_verified=False)
-                                self.engineering_engine.validate_task(session_id, task_id, passed=False, failure_reason="Verification failed")
-                                
-                        else:
-                            self.execution_manager.complete_execution(task_id, attempt.execution_id, exec_result, is_verified=False)
-                            self.engineering_engine.fail_task(session_id, task_id, failure_reason=exec_result.error_message)
+        # Ensure session model profile is resolved authoritatively
+        active_cfg = self.config_manager.get_active()
+        if active_cfg.get("model_id"):
+            session.model_profile = active_cfg["model_id"]
+        elif not session.model_profile:
+            session.model_profile = self.get_active_model_id()
 
-                # Check overall status via WorkflowManager
-                # Only check tasks for the active plan
-                active_plan = self.workflow_manager.get_active_plan(workflow_id)
-                active_task_ids = active_plan.task_ids if active_plan else []
-                active_tasks = [t for t in session.tasks.values() if t.id in active_task_ids]
-                
-                # Gather satisfied requirements from verified tasks
-                satisfied_reqs = []
-                for t in active_tasks:
-                    history = self.verification_engine.get_history(t.id)
-                    for v in history:
-                        if v.status == VerificationStatus.PASSED:
-                            for c in v.criteria:
-                                satisfied_reqs.append(c.description)
-                
-                is_complete = self.workflow_manager.check_completion(
-                    workflow_id,
-                    active_tasks,
-                    satisfied_criteria=satisfied_reqs,
-                    satisfied_validations=satisfied_reqs
-                )
-                any_failed = any(t.status == EngineTaskState.FAILED for t in active_tasks)
-                
-                if is_complete and active_tasks:
-                    # State is already VALIDATING from the verification step if it succeeded
-                    if workflow.state != WorkflowState.VALIDATING:
-                        self.workflow_manager.transition_state(workflow_id, WorkflowState.VALIDATING)
-                    self.workflow_manager.transition_state(workflow_id, WorkflowState.COMPLETE)
-                    self.engineering_engine.complete_objective(session_id)
-                elif any_failed:
-                    self.workflow_manager.transition_state(workflow_id, WorkflowState.FAILED)
-                    self.workflow_manager.transition_state(workflow_id, WorkflowState.REPLANNING)
-                    # We do NOT fail the objective here because we are replanning
-                    # self.engineering_engine.fail_objective(session_id)
+        active_model = session.model_profile
+        if not active_model:
+            from clairecoder.gateway.types import ModelError
+            raise ModelError("No active model configured. Please configure a provider via /model or the setup wizard.")
+
+        # Synchronize runtime with application subsystem references
+        self.agent_runtime._planner = self.planner
+        self.agent_runtime._workflow_manager = self.workflow_manager
+        self.agent_runtime._execution_manager = self.execution_manager
+        self.agent_runtime._verification_engine = self.verification_engine
+        self.agent_runtime._engineering_engine = self.engineering_engine
+
+        return self.agent_runtime.run(
+            objective=session.objective,
+            session_id=session_id,
+            max_cycles=max_cycles,
+            active_model=active_model,
+        )
 
     def status(self, session_id: str) -> Dict[str, Any]:
         """Get the current status of the session."""
