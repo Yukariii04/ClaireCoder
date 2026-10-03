@@ -55,6 +55,10 @@ class TranscriptView:
             existing.diff_info = updated_activity.diff_info
             existing.expanded = updated_activity.expanded
             existing.metadata = updated_activity.metadata
+            existing.activity_event = getattr(updated_activity, "activity_event", None)
+            existing.additions = getattr(updated_activity, "additions", None)
+            existing.deletions = getattr(updated_activity, "deletions", None)
+            existing.change_summary = getattr(updated_activity, "change_summary", None)
             if self._follow_tail:
                 self.scroll_to_bottom()
             else:

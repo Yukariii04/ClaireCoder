@@ -153,11 +153,11 @@ RFD (9 docs) → RES (8 docs) → ADR (6 docs) → PRD (10 docs) → IMPLEMENTAT
   - **E2E Coding Agent Acceptance Tests (§36, §37)**: 72 new comprehensive tests in `tests/tools/test_correction_10.py` and `tests/tools/test_mode_policy.py`.
   - **Test Suite Pass Rate**: 656 passed, 0 skipped, 0 failures, 0 errors, 0 warnings (`pytest -W error`).
 
-- **Current**: CLI / TUI Stage 7 Correction #19 (Tool / Workspace Layer + Safe Project-Root Filesystem Access + Path Traversal Rejection + Structured Tool/ToolResult Model + Core Tools [read, write, delete, list, run_command] + Deterministic ToolRegistry + Runtime & ChangeSet Integration + Tool Events & Error Hierarchy) completed.
-- **Completed**: Phase 1-12, CLI / TUI Stage 1-6 (Corrections #1-#10), Stage 7 (Corrections #1-#19).
+- **Current**: CLI / TUI Stage 7 Correction #20 (Structured TUI Activity System + ActivityEvent & ExecutionChangeSummary Models + ActivityMapper + Clean Visual Markers [●, ✓, ✗] + ChangeSet Execution Summary + Deterministic Event Ordering & In-Place Correlation + Concise Error Presentation & Traceback Stripping + Strict Presentation/Runtime Boundary Separation) completed.
+- **Completed**: Phase 1-12, CLI / TUI Stage 1-6 (Corrections #1-#10), Stage 7 (Corrections #1-#20).
 
 ### Current State
-- **Active Stage**: Stage 7 Correction #19 Completed and Verified.
+- **Active Stage**: Stage 7 Correction #20 Completed and Verified.
 - **Next Steps**: Await user testing feedback and authorization before proceeding to next phase/correction.
 
 ### Phase Status
@@ -185,8 +185,10 @@ RFD (9 docs) → RES (8 docs) → ADR (6 docs) → PRD (10 docs) → IMPLEMENTAT
 - **CLI / TUI Stage 7 Correction #17 (Verification as a First-Class Boundary + Structured VerificationResult + Clean Verifier Interface + DefaultVerifier + Task State EXECUTED/VERIFYING + Bounded Retry/Replan Recovery + Persistent Failure Evidence + ChangeSet Integration + Runtime Events + RunResult Distinction)**: Completed and Verified.
 - **CLI / TUI Stage 7 Correction #18 (Agent Roles / Subagents + Bounded Role Contracts + RoleRegistry + RoleContext Bounded Information + Role Events & Failure Isolation + Single Orchestration Authority Preservation)**: Completed and Verified.
 - **CLI / TUI Stage 7 Correction #19 (Tool / Workspace Layer + Safe Project-Root Filesystem Access + Path Traversal Rejection + Structured Tool/ToolResult Model + Core Tools + Deterministic ToolRegistry + Runtime & ChangeSet Integration + Tool Events & Error Hierarchy)**: Completed and Verified.
+- **CLI / TUI Stage 7 Correction #20 (TUI Activity System + Modern Activity Stream + ChangeSet Summary + In-Place Correlation + Concise Error Presentation + Backwards-Compatible TUI Bridge)**: Completed and Verified.
 
 ### Recent Artifacts
+- `Phase_CLI_TUI_Stage_7_Correction_20.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_19.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_18.zip`
 - `Phase_CLI_TUI_Stage_7_Correction_17.zip`

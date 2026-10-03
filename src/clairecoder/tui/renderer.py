@@ -65,6 +65,44 @@ class ActivityRenderer:
                     wrapped.append(ln)
             return wrapped
 
+        # Direct ActivityEvent rendering (Correction #20)
+        if getattr(activity, "activity_event", None) is not None:
+            raw_lines = activity.activity_event.render_lines(width=width)
+            wrapped: List[str] = []
+            for ln in raw_lines:
+                if len(ln) > width and width > 10:
+                    wrapped.extend(_wrap_text(ln, width, indent="  "))
+                else:
+                    wrapped.append(ln)
+            return wrapped
+
+        # Direct ChangeSummary rendering (Correction #20)
+        if getattr(activity, "change_summary", None) is not None:
+            raw_lines = activity.change_summary.format_summary(width=width)
+            wrapped: List[str] = []
+            for ln in raw_lines:
+                if len(ln) > width and width > 10:
+                    wrapped.extend(_wrap_text(ln, width, indent="  "))
+                else:
+                    wrapped.append(ln)
+            return wrapped
+
+        # Check if title already begins with modern activity marker (●, ✓, ✗)
+        title_text = activity.title
+        if title_text.startswith(("●", "✓", "✗")):
+            lines = [title_text]
+            if activity.detail:
+                for dl in activity.detail.splitlines():
+                    if dl.strip():
+                        lines.append(f"  {dl.strip()}")
+            wrapped = []
+            for ln in lines:
+                if len(ln) > width and width > 10:
+                    wrapped.extend(_wrap_text(ln, width, indent="  "))
+                else:
+                    wrapped.append(ln)
+            return wrapped
+
         # Standard agent activity
         marker = "> ◌"
         if activity.state == ActivityState.COMPLETED:
@@ -79,7 +117,6 @@ class ActivityRenderer:
         elif activity.state in (ActivityState.APPROVAL_REQUIRED, ActivityState.BLOCKED):
             marker = "> ⚠"
 
-        title_text = activity.title
         # If title doesn't start with marker, prepend it
         if not title_text.startswith(">"):
             header_line = f"{marker} {title_text}"

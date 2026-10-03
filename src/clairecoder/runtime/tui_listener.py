@@ -51,6 +51,25 @@ class RuntimeEventTuiListener:
 
         Returns None for events that don't need user-visible activity.
         """
+        activity = RuntimeEventTuiListener._build_activity(event)
+        if activity is not None:
+            try:
+                from clairecoder.tui.activity_mapper import ActivityMapper
+                act_event = ActivityMapper.from_runtime_event(event)
+                if act_event is not None:
+                    activity.activity_event = act_event
+                    if act_event.additions is not None:
+                        activity.additions = act_event.additions
+                    if act_event.deletions is not None:
+                        activity.deletions = act_event.deletions
+                    if act_event.change_summary is not None:
+                        activity.change_summary = act_event.change_summary
+            except Exception:
+                pass
+        return activity
+
+    @staticmethod
+    def _build_activity(event: RuntimeEvent) -> Optional[ActivityModel]:
         etype = event.event_type
         payload = event.payload
 
@@ -329,6 +348,13 @@ class RuntimeEventTuiListener:
                 title="Agent error",
                 detail=payload.get("error"),
             )
+
+        # --- ChangeSet events ---
+        if etype == EventType.CHANGESET_COMPLETED:
+            from clairecoder.tui.activity_mapper import ActivityMapper
+            act_event = ActivityMapper.from_runtime_event(event)
+            if act_event is not None:
+                return act_event.to_activity_model()
 
         # Unhandled events — no activity
         return None

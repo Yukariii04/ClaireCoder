@@ -2,7 +2,20 @@
 from .app import TuiApplication
 from .states import InputState, TerminalMode
 from .terminal import TerminalCapability, TerminalRenderer, TerminalInput, InputDecoder, KeyEvent
-from .activity import ActivityModel, ActivityState, ActivityType, DiffInfo, DiffLine
+from .activity import (
+    ActivityModel,
+    ActivityState,
+    ActivityType,
+    DiffInfo,
+    DiffLine,
+    ActivityStatus,
+    ActivityOperation,
+    ActivityEvent,
+    ExecutionChangeSummary,
+    ChangeSummaryItem,
+    truncate_path,
+)
+from .activity_mapper import ActivityMapper, format_concise_error, extract_command_summary
 from .permission import PermissionSurface, PermissionDecision, PermissionRequestViewModel
 from .diff import FileDiff, DiffRenderer
 from .review import ReviewOverlay
@@ -28,6 +41,15 @@ __all__ = [
     "ActivityModel",
     "ActivityState",
     "ActivityType",
+    "ActivityStatus",
+    "ActivityOperation",
+    "ActivityEvent",
+    "ExecutionChangeSummary",
+    "ChangeSummaryItem",
+    "truncate_path",
+    "ActivityMapper",
+    "format_concise_error",
+    "extract_command_summary",
     "DiffInfo",
     "DiffLine",
     "PermissionSurface",

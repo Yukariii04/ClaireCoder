@@ -1418,4 +1418,41 @@
   - 46 new focused tests (26 workspace, 15 tools, 5 integration).
   - Full test suite: **952 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_19.zip`.
+- **Next Authorized Milestone**: Completed.
+
+### 2026-10-03 — CLI / TUI Stage 7: Correction #20 (TUI Activity System)
+- **Status**: COMPLETED
+- **Goal**: Replace low-level raw runtime output in the TUI with a structured, readable activity stream matching modern coding agents (● running, ✓ completed, ✗ failed) plus compact execution change summaries from ChangeSets.
+- **Architectural Enhancements**:
+  - **TUI Activity Event Model (`clairecoder.tui.activity`)**:
+    - `ActivityStatus` (`RUNNING`, `COMPLETED`, `FAILED`).
+    - `ActivityOperation` (`READING`, `EDITING`, `CREATING`, `DELETING`, `RUNNING`, `VERIFYING`, `PLANNING`, `MESSAGE`).
+    - `ActivityEvent`: Presentation model supporting status, operation, target, details, additions, deletions, duration, and correlation keys.
+    - `ExecutionChangeSummary` & `ChangeSummaryItem`: Compact aggregate presentation derived from ChangeSets (`N files changed +X -Y Review`).
+    - Safe path truncation (`truncate_path`) retaining root context and file basename within column bounds.
+    - `render_lines()` producing clean modern reference UX markers (`● Reading src/foo.py`, `✓ Read 213 lines`, `✓ Editing src/foo.py\n  +12 -4`, `✓ Running pytest\n  14 passed`, `✓ Verification passed`).
+  - **Activity Mapper (`clairecoder.tui.activity_mapper.ActivityMapper`)**:
+    - Unidirectional translation: `RuntimeEvent` / `ToolResult` / `ChangeSet` -> `ActivityEvent` -> `ActivityModel` -> TUI renderer.
+    - Lifecycle mapping for `TOOL_STARTED`, `TOOL_COMPLETED`, `TOOL_FAILED`, `VERIFICATION_*`, `PLAN_*`, `TASK_*`, `CHANGESET_COMPLETED`.
+    - Concise error presentation (`format_concise_error`): strips Python tracebacks and internal frames, extracts exit codes and salient test failures (`exit code 1\n2 tests failed`).
+    - Command output summary extraction (`extract_command_summary`): identifies test outcome counts (`14 passed`, `2 failed, 14 passed`).
+  - **TUI Transcript & Renderer Integration (`ActivityRenderer`, `TranscriptView`, `RuntimeEventTuiListener`)**:
+    - In-place activity update using stable correlation keys (`rtool_<id>`, `rcmd_<id>`, `rver_<id>`) preventing duplicate rows for started/completed transitions.
+    - Backward compatibility: legacy `ActivityModel` rendering and title assertions preserved while modern events render clean activity lines.
+    - Null safety: handles missing optional metadata without throwing exceptions.
+- **Files Created**:
+  - `src/clairecoder/tui/activity_mapper.py`
+  - `tests/tui/test_activity_stream.py`
+- **Files Modified**:
+  - `src/clairecoder/tui/activity.py`
+  - `src/clairecoder/tui/renderer.py`
+  - `src/clairecoder/tui/transcript.py`
+  - `src/clairecoder/tui/__init__.py`
+  - `src/clairecoder/runtime/tui_listener.py`
+  - `memory.md`
+  - `update.md`
+- **Tests**:
+  - 33 new focused tests in `tests/tui/test_activity_stream.py` covering all 11 requirements.
+  - Complete test suite: **985 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
+- **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_20.zip`.
 - **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning next phase.
