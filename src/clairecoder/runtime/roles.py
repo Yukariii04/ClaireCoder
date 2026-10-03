@@ -239,13 +239,49 @@ class ImplementerRole(AgentRole):
         """Access the underlying executor for direct delegation."""
         return self._executor
 
+    @property
+    def tool_registry(self) -> Optional[Any]:
+        """Access the tool registry if the executor is one or holds one."""
+        if hasattr(self._executor, "resolve"):
+            return self._executor
+        return getattr(self._executor, "tool_registry", None)
+
     def execute(self, context: RoleContext) -> RoleResult:
-        """Execute a task via the underlying executor.
+        """Execute a task or tool via the underlying executor / registry.
 
         The runtime wraps this call with workspace capture, changeset
         recording, and event emission.
         """
         try:
+            tool_name = context.metadata.get("tool_name")
+            if tool_name:
+                if hasattr(self._executor, "resolve"):
+                    tool = self._executor.resolve(tool_name)
+                    tool_res = tool.execute(
+                        context=context.metadata.get("tool_context"),
+                        arguments=context.metadata.get("arguments", {}),
+                    )
+                    return RoleResult(
+                        role=self.name,
+                        success=tool_res.success,
+                        output=tool_res,
+                        error=tool_res.error if not tool_res.success else None,
+                        metadata={"tool_name": tool_name, **tool_res.metadata},
+                    )
+                elif hasattr(self._executor, "execute_tool"):
+                    tool_res = self._executor.execute_tool(
+                        tool_name=tool_name,
+                        arguments=context.metadata.get("arguments", {}),
+                        context=context.metadata.get("tool_context"),
+                    )
+                    return RoleResult(
+                        role=self.name,
+                        success=tool_res.success,
+                        output=tool_res,
+                        error=tool_res.error if not tool_res.success else None,
+                        metadata={"tool_name": tool_name},
+                    )
+
             task = context.task
             if task is None:
                 return RoleResult(

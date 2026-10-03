@@ -11,9 +11,16 @@ Correction #14: Extracted from app.py to establish a clean boundary:
     ROLES        — bounded role responsibilities (Correction #18)
 """
 
+import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+from clairecoder.workspace.workspace import Workspace
+from clairecoder.tools.registry import ToolRegistry
+from clairecoder.tools.tool import ToolContext
+from clairecoder.core.types import ToolResult, ToolState
 
 from clairecoder.workflow.types import (
     Plan,
@@ -112,6 +119,8 @@ class AgentRuntime:
         changeset_store: Optional[ChangeSetStore] = None,
         max_task_retries: int = 0,
         role_registry: Optional[RoleRegistry] = None,
+        workspace: Optional[Any] = None,
+        tool_registry: Optional[Any] = None,
     ) -> None:
         self._planner = planner if planner is not None else Planner()
         self._executor = executor
@@ -123,7 +132,24 @@ class AgentRuntime:
         self._verification_engine = verification_engine or (verifier if hasattr(verifier, "create_verification") else None)
         self._model_gateway = model_gateway
         self._config_manager = config_manager
-        self._workspace_root = workspace_root
+
+        # Workspace abstraction boundary (Correction #19)
+        if workspace is not None:
+            self._workspace = workspace
+            self._workspace_root = str(self._workspace.root)
+        elif workspace_root is not None:
+            self._workspace = Workspace(workspace_root)
+            self._workspace_root = str(self._workspace.root)
+        else:
+            self._workspace = Workspace(Path.cwd())
+            self._workspace_root = str(self._workspace.root)
+
+        # ToolRegistry boundary (Correction #19)
+        if tool_registry is not None:
+            self._tool_registry = tool_registry
+        else:
+            self._tool_registry = ToolRegistry.create_default(workspace=self._workspace)
+
         self._changeset_store = changeset_store if changeset_store is not None else ChangeSetStore()
         self._max_task_retries = max_task_retries
         self._role_registry = role_registry if role_registry is not None else self._build_default_registry()
@@ -149,6 +175,16 @@ class AgentRuntime:
         """Access the role registry for inspection or injection."""
         return self._role_registry
 
+    @property
+    def workspace(self) -> Workspace:
+        """Access the workspace abstraction for safe project-root operations."""
+        return self._workspace
+
+    @property
+    def tool_registry(self) -> ToolRegistry:
+        """Access the tool registry."""
+        return self._tool_registry
+
     def _build_default_registry(self) -> RoleRegistry:
         """Build a default role registry from current subsystem configuration."""
         registry = RoleRegistry()
@@ -163,6 +199,111 @@ class AgentRuntime:
             max_task_retries=self._max_task_retries,
         ))
         return registry
+
+    def execute_tool(
+        self,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        context: Optional[Any] = None,
+        run_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+    ) -> ToolResult:
+        """Execute a tool via ToolRegistry with structured event emission and error containment (Correction #19 §7, §9).
+
+        Emits:
+            TOOL_STARTED -> tool.execute() -> TOOL_COMPLETED or TOOL_FAILED
+        """
+        r_run_id = run_id or getattr(context, "run_id", None)
+        r_task_id = task_id or getattr(context, "task_id", None)
+
+        safe_args = {
+            k: (v if k != "content" or len(str(v)) <= 50 else f"<content {len(str(v))} chars>")
+            for k, v in (arguments or {}).items()
+        }
+
+        # Emit TOOL_STARTED
+        self._emit(
+            EventType.TOOL_STARTED,
+            run_id=r_run_id,
+            task_id=r_task_id,
+            payload={
+                "tool": tool_name,
+                "arguments": safe_args,
+            },
+        )
+
+        # Resolve tool
+        try:
+            tool = self._tool_registry.resolve(tool_name)
+        except Exception as e:
+            self._emit(
+                EventType.TOOL_FAILED,
+                run_id=r_run_id,
+                task_id=r_task_id,
+                payload={
+                    "tool": tool_name,
+                    "success": False,
+                    "error": str(e),
+                },
+            )
+            return ToolResult(
+                success=False,
+                error=str(e),
+                metadata={"tool": tool_name, "error_type": type(e).__name__},
+            )
+
+        # Build context if needed
+        t_ctx = context
+        if t_ctx is None:
+            t_ctx = ToolContext(
+                run_id=r_run_id,
+                task_id=r_task_id,
+                workspace=self._workspace,
+            )
+
+        # Execute
+        start_t = time.time()
+        try:
+            result = tool.execute(context=t_ctx, arguments=arguments)
+        except Exception as e:
+            duration = time.time() - start_t
+            result = ToolResult(
+                success=False,
+                error=str(e),
+                duration=duration,
+                metadata={"tool": tool_name, "exception_type": type(e).__name__},
+            )
+
+        # Emit outcome
+        if result.success:
+            self._emit(
+                EventType.TOOL_COMPLETED,
+                run_id=r_run_id,
+                task_id=r_task_id,
+                payload={
+                    "tool": tool_name,
+                    "success": True,
+                    "duration": result.duration,
+                    "changed_files": result.changed_files,
+                    "changeset_id": result.changeset_id,
+                    "metadata": result.metadata,
+                },
+            )
+        else:
+            self._emit(
+                EventType.TOOL_FAILED,
+                run_id=r_run_id,
+                task_id=r_task_id,
+                payload={
+                    "tool": tool_name,
+                    "success": False,
+                    "error": result.error,
+                    "duration": result.duration,
+                    "metadata": result.metadata,
+                },
+            )
+
+        return result
 
     def invoke_role(
         self,
@@ -475,8 +616,8 @@ class AgentRuntime:
                 exec_id = f"exec_{task_id}_{attempt_num}"
                 self._sync_task_start(task, session_id, workflow_id, exec_id, attempt_num)
 
-                # Capture workspace state BEFORE task execution (Correction #16)
-                tracker = ChangeTracker(workspace_root=self._workspace_root)
+                # Capture workspace state BEFORE task execution (Correction #16, #19)
+                tracker = self._workspace.create_tracker()
                 tracker.capture_before()
 
                 # Execute Task via Executor

@@ -137,6 +137,11 @@ class ChangeSet:
         return [f.path for f in self.files]
 
     @property
+    def modified_paths(self) -> List[str]:
+        """Alias for changed_paths."""
+        return self.changed_paths
+
+    @property
     def file_count(self) -> int:
         """Number of changed files in this ChangeSet."""
         return len(self.files)

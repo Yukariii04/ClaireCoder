@@ -1353,4 +1353,69 @@
     12. Backward compatibility with existing execution, verification, and recovery
   - Full test suite: **906 passed, 0 skipped, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_18.zip`.
+
+### 2026-10-03 — CLI / TUI Stage 7: Correction #19 (Tool / Workspace Layer)
+- **Status**: Completed
+- **Objective**: Create a clean Tool + Workspace boundary so the agent runtime does not directly depend on raw filesystem/process operations. Tools produce structured results while Workspace owns safe project-root file access.
+- **Implemented**:
+  - **Workspace Abstraction (`clairecoder.workspace.workspace.Workspace`)**:
+    - Project-root bounded filesystem operations: `read_file`, `write_file`, `write_bytes`, `delete_file`, `exists`, `is_file`, `is_dir`, `list_files`, `relative_path`, `snapshot`, `create_tracker`.
+    - Integrated with existing `ChangeTracker` and `WorkspaceSnapshot` from Correction #16 without duplicating diff engine.
+    - Large and binary file safety: `is_binary_buffer` detection raising `WorkspaceBinaryFileError` on text reads of binary files, size budget limits (`max_bytes`) raising `WorkspaceFileTooLargeError`.
+    - Deterministic file listing sorting alphabetically without unbounded recursive traversal by default.
+  - **Path Safety & Boundary Enforcement (`clairecoder.workspace.path_safety`)**:
+    - Centralized `normalize_workspace_path` and `is_within_workspace`.
+    - Strict boundary checking handling relative paths, absolute paths, directory traversal (`..`), symlinks, Windows separators (`\`, `/`), mixed separators, and nonexistent paths.
+    - Rejects path escape attempts with structured `WorkspacePathEscapeError` without silently rewriting unsafe paths.
+  - **Structured Tool Model & Result (`clairecoder.tools.tool.Tool`, `ToolResult`)**:
+    - `Tool` ABC defining `name`, `description`, and `execute(context, arguments) -> ToolResult`.
+    - `ToolResult` updated with structured fields: `success`, `output`, `error`, `duration`, `metadata`, `changed_files`, `changeset_id`, and `to_dict()`, while maintaining backwards compatibility with `ToolState`.
+    - `ToolContext` providing runtime correlation (`run_id`, `task_id`, `session_id`) and Workspace access.
+  - **Core Tools (`clairecoder.tools.structured`)**:
+    - `ReadFileTool`: Safe text reading with binary check, size limit, and missing file handling.
+    - `WriteFileTool`: Parent directory auto-creation, structured write with `changed_files` metadata.
+    - `DeleteFileTool`: Safe file deletion with missing file check and `changed_files` tracking.
+    - `ListFilesTool`: Deterministic directory listing with optional recursion and depth controls.
+    - `RunCommandTool`: Subprocess command execution strictly within workspace cwd capturing `command`, `exit_code`, `stdout`, `stderr`, `duration`, `cwd`, and `success`.
+  - **Tool Registry (`clairecoder.tools.registry.ToolRegistry`)**:
+    - Deterministic tool lookup and registration.
+    - Duplicate registration protection raising `DuplicateToolError`.
+    - Unknown tool lookup protection raising `UnknownToolError`.
+    - Built-in aliases and test injection of mock/fake tools without dynamic plugin loading.
+    - Factory `ToolRegistry.create_default(workspace)` registering all 5 core tools.
+  - **Runtime & Role Integration (`AgentRuntime`, `ImplementerRole`)**:
+    - `AgentRuntime` exposes `workspace` and `tool_registry` properties.
+    - Added `runtime.execute_tool(name, arguments, ...)` with structured event lifecycle: `TOOL_STARTED`, `TOOL_COMPLETED`, `TOOL_FAILED`.
+    - All tool errors are contained in structured `ToolResult` failure objects; tool failures cannot crash runtime or become false successes.
+    - `ImplementerRole` updated to resolve and execute tools via `ToolRegistry`.
+    - Tasks capture before/after workspace state via `self._workspace.create_tracker()` flowing changes into `ChangeSetStore`.
+  - **Structured Error Hierarchy (`clairecoder.workspace.errors`, `clairecoder.tools.errors`)**:
+    - Workspace errors: `WorkspaceError`, `WorkspacePathEscapeError`, `WorkspaceFileNotFoundError`, `WorkspaceIsADirectoryError`, `WorkspaceNotADirectoryError`, `WorkspacePermissionError`, `WorkspaceFileTooLargeError`, `WorkspaceBinaryFileError`.
+    - Tool errors: `ToolError`, `UnknownToolError`, `DuplicateToolError`, `InvalidToolArgumentsError`, `CommandExecutionError`, `ToolExecutionError`.
+- **Files Created**:
+  - `src/clairecoder/workspace/__init__.py`
+  - `src/clairecoder/workspace/errors.py`
+  - `src/clairecoder/workspace/path_safety.py`
+  - `src/clairecoder/workspace/workspace.py`
+  - `src/clairecoder/tools/errors.py`
+  - `src/clairecoder/tools/tool.py`
+  - `src/clairecoder/tools/structured.py`
+  - `tests/workspace/__init__.py`
+  - `tests/workspace/test_workspace.py`
+  - `tests/tools/test_workspace_tools.py`
+  - `tests/runtime/test_tool_integration.py`
+- **Files Modified**:
+  - `src/clairecoder/core/types.py`
+  - `src/clairecoder/tools/workspace.py`
+  - `src/clairecoder/tools/registry.py`
+  - `src/clairecoder/tools/__init__.py`
+  - `src/clairecoder/runtime/agent_runtime.py`
+  - `src/clairecoder/runtime/roles.py`
+  - `src/clairecoder/changeset/types.py`
+  - `memory.md`
+  - `update.md`
+- **Tests**:
+  - 46 new focused tests (26 workspace, 15 tools, 5 integration).
+  - Full test suite: **952 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
+- **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_19.zip`.
 - **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning next phase.
