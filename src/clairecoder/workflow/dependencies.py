@@ -108,19 +108,23 @@ def get_ready_tasks(tasks: List[Task]) -> List[Task]:
 
     CC-PRD-004 Section 9: A dependent Task SHALL not become executable
     until its required dependencies are satisfied.
-    """
-    # Removed duplicate inner import since it's now at module level
 
+    Correction #13: Also returns tasks already in READY state.
+    """
     completed_ids: Set[str] = {
         t.id for t in tasks if t.status == TaskState.SUCCEEDED
     }
 
     ready: List[Task] = []
     for task in tasks:
-        if task.status != TaskState.PENDING:
-            continue
-        if all(dep_id in completed_ids for dep_id in task.dependencies):
+        # Already READY — include directly
+        if task.status == TaskState.READY:
             ready.append(task)
+            continue
+        # PENDING with all deps satisfied — promote to ready
+        if task.status == TaskState.PENDING:
+            if all(dep_id in completed_ids for dep_id in task.dependencies):
+                ready.append(task)
 
     return ready
 

@@ -2,6 +2,8 @@
 
 CC-PRD-004: Workflow, Context & Engineering Session System.
 CC-ADR-004: Workflow, Context & Engineering Session Architecture.
+
+Correction #13: Exports TaskGraph, TaskType, TaskGraphError.
 """
 
 from .types import (
@@ -9,15 +11,21 @@ from .types import (
     WorkflowState,
     Plan,
     PlanningLevel,
+    Task,
+    TaskState,
+    TaskStatus,
+    TaskType,
     WorkflowError,
     WorkflowStateError,
     DependencyCycleError,
     DependencyNotFoundError,
     InvalidDependencyError,
     PlanningError,
+    TaskGraphError,
 )
 from .manager import WorkflowManager
 from .planner import Planner
+from .task_graph import TaskGraph
 from .dependencies import (
     validate_dependencies,
     topological_order,
@@ -29,14 +37,20 @@ __all__ = [
     "WorkflowState",
     "Plan",
     "PlanningLevel",
+    "Task",
+    "TaskState",
+    "TaskStatus",
+    "TaskType",
     "WorkflowError",
     "WorkflowStateError",
     "DependencyCycleError",
     "DependencyNotFoundError",
     "InvalidDependencyError",
     "PlanningError",
+    "TaskGraphError",
     "WorkflowManager",
     "Planner",
+    "TaskGraph",
     "validate_dependencies",
     "topological_order",
     "get_ready_tasks",

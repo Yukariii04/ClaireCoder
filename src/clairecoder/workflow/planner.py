@@ -7,6 +7,10 @@ CC-ADR-004 Section 10: Replanning.
 The Planner generates Plans by interacting with the Model Gateway through
 the EngineeringEngine boundary. It does NOT access models, tools, or
 permissions directly.
+
+Correction #13: Task creation preserves structured information from the
+model's plan output (title, description, type, inputs, expected_outputs,
+validation) instead of reducing to "Task: {task_id}".
 """
 
 import json
@@ -14,8 +18,44 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from clairecoder.gateway.types import ModelRequest, ModelResponse
-from .types import Plan, PlanningLevel, PlanningError, Task, TaskState
+from .types import Plan, PlanningLevel, PlanningError, Task, TaskState, TaskType
 from .dependencies import validate_plan_dependencies
+
+
+# Safe mapping from model-provided type strings to TaskType
+_TYPE_MAP: Dict[str, TaskType] = {
+    "analysis": TaskType.ANALYSIS,
+    "implementation": TaskType.IMPLEMENTATION,
+    "implement": TaskType.IMPLEMENTATION,
+    "test": TaskType.TEST,
+    "testing": TaskType.TEST,
+    "refactor": TaskType.REFACTOR,
+    "refactoring": TaskType.REFACTOR,
+    "verification": TaskType.VERIFICATION,
+    "verify": TaskType.VERIFICATION,
+    "documentation": TaskType.DOCUMENTATION,
+    "docs": TaskType.DOCUMENTATION,
+    "doc": TaskType.DOCUMENTATION,
+    "other": TaskType.OTHER,
+}
+
+
+def _parse_task_type(raw: Any) -> TaskType:
+    """Parse a task type string into a TaskType enum, defaulting safely."""
+    if isinstance(raw, str):
+        return _TYPE_MAP.get(raw.lower().strip(), TaskType.IMPLEMENTATION)
+    return TaskType.IMPLEMENTATION
+
+
+def _ensure_str_list(val: Any) -> List[str]:
+    """Coerce a value to a list of strings, tolerating model output quirks."""
+    if val is None:
+        return []
+    if isinstance(val, str):
+        return [val] if val.strip() else []
+    if isinstance(val, list):
+        return [str(v) for v in val if v is not None]
+    return []
 
 
 class Planner:
@@ -96,17 +136,48 @@ class Planner:
     def create_tasks_from_plan(self, plan: Plan, objective_id: str) -> List[Task]:
         """Convert a Plan's task descriptions into Task objects.
 
-        Reuses the existing Task type from engine/types.py to maintain
-        consistency with Phase 7.
+        Correction #13: Preserves structured task information from
+        plan.task_details instead of reducing to "Task: {task_id}".
+
+        If task_details are not available for a task_id, falls back to
+        a reasonable default using the task_id as description.
         """
         tasks: List[Task] = []
         for task_id in plan.task_ids:
             deps = plan.dependencies.get(task_id, [])
+            details = plan.task_details.get(task_id, {})
+
+            # Extract structured fields with safe defaults
+            title = details.get("title", "") or ""
+            description = details.get("description", "") or ""
+            task_type = _parse_task_type(details.get("type"))
+            inputs = _ensure_str_list(details.get("inputs"))
+            expected_outputs = _ensure_str_list(details.get("expected_outputs"))
+            validation = _ensure_str_list(details.get("validation"))
+            metadata = details.get("metadata", {}) if isinstance(details.get("metadata"), dict) else {}
+
+            # Ensure we always have a meaningful description
+            if not description:
+                if title:
+                    description = title
+                else:
+                    description = f"Task: {task_id}"
+
+            # If no explicit title, derive from task_id
+            if not title:
+                title = task_id.replace("_", " ").replace("-", " ").title()
+
             task = Task(
                 id=task_id,
                 objective_id=objective_id,
-                description=f"Task: {task_id}",
+                title=title,
+                description=description,
+                type=task_type,
                 dependencies=deps,
+                inputs=inputs,
+                expected_outputs=expected_outputs,
+                validation=validation,
+                metadata=metadata,
             )
             tasks.append(task)
         return tasks
@@ -116,13 +187,16 @@ class Planner:
         objective: str,
         planning_level: PlanningLevel,
         context_summary: str,
-        model_id: str = "default-model",
+        model_id: Optional[str] = None,
     ) -> ModelRequest:
         """Build a ModelRequest for planning.
 
         CC-ADR-004 Section 6: Planning requires model reasoning.
         This method prepares the request; the EngineeringEngine is responsible
         for executing it through the Model Gateway.
+
+        Correction #13: Request schema now includes per-task structured fields
+        (title, description, type, inputs, expected_outputs, validation).
         """
         level_descriptions = {
             PlanningLevel.DIRECT: "Direct execution — minimal planning required.",
@@ -140,13 +214,20 @@ class Planner:
             f"  affected_areas: list of strings\n"
             f"  task_ids: list of task identifier strings\n"
             f"  dependencies: dict mapping task_id to list of dependency task_ids\n"
+            f"  task_details: dict mapping each task_id to an object with:\n"
+            f"    title: human-readable task title\n"
+            f"    description: what needs to be done and why\n"
+            f"    type: one of analysis/implementation/test/refactor/verification/documentation/other\n"
+            f"    inputs: list of input files or resources\n"
+            f"    expected_outputs: list of expected deliverables\n"
+            f"    validation: list of validation commands or checks\n"
             f"  validation_strategy: list of strings\n"
             f"  risks: list of strings\n"
             f"  completion_criteria: list of strings\n"
         )
 
         return ModelRequest(
-            model_id=model_id,
+            model_id=model_id or "",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Plan this objective: {objective}"},
@@ -159,7 +240,7 @@ class Planner:
         previous_plan: Plan,
         failure_reason: str,
         context_summary: str,
-        model_id: str = "default-model",
+        model_id: Optional[str] = None,
     ) -> ModelRequest:
         """Build a ModelRequest for replanning after failure.
 
@@ -183,7 +264,7 @@ class Planner:
         )
 
         return ModelRequest(
-            model_id=model_id,
+            model_id=model_id or "",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Replan this objective: {objective}"},
@@ -219,9 +300,39 @@ class Planner:
 
         Validates structural integrity before constructing the Plan.
         Malformed data raises PlanningError.
+
+        Correction #13: Extracts task_details from the model output
+        to preserve per-task structured information.
         """
-        task_ids = data.get("task_ids", [])
-        dependencies = data.get("dependencies", {})
+        task_ids = list(data.get("task_ids", []))
+        dependencies = dict(data.get("dependencies", {}))
+
+        # Extract per-task details (Correction #13)
+        task_details: Dict[str, Dict[str, Any]] = {}
+
+        # 1. From "tasks" list of dicts (common model format)
+        raw_tasks = data.get("tasks", [])
+        if isinstance(raw_tasks, list):
+            for item in raw_tasks:
+                if isinstance(item, dict):
+                    tid = item.get("id") or item.get("task_id")
+                    if tid:
+                        if tid not in task_ids:
+                            task_ids.append(tid)
+                        if tid not in dependencies and "dependencies" in item:
+                            deps = item["dependencies"]
+                            if isinstance(deps, list):
+                                dependencies[tid] = deps
+                        task_details[tid] = item
+
+        # 2. From "task_details" mapping (task_id -> dict)
+        raw_task_details = data.get("task_details", {})
+        if isinstance(raw_task_details, dict):
+            for tid, details in raw_task_details.items():
+                if isinstance(details, dict):
+                    if tid not in task_ids:
+                        task_ids.append(tid)
+                    task_details[tid] = details
 
         # Validate dependency structure using centralized validation.
         # Wraps dependency errors in PlanningError for the planning boundary.
@@ -243,4 +354,5 @@ class Planner:
             validation_strategy=data.get("validation_strategy", []),
             risks=data.get("risks", []),
             completion_criteria=data.get("completion_criteria", []),
+            task_details=task_details,
         )

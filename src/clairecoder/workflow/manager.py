@@ -19,6 +19,7 @@ from .types import (
     WorkflowStateError,
     Task,
     TaskState,
+    TaskType,
 )
 from .dependencies import validate_dependencies, topological_order, get_ready_tasks, validate_plan_dependencies
 
@@ -298,6 +299,7 @@ class WorkflowManager:
                 "is_superseded": plan.is_superseded,
                 "superseded_by": plan.superseded_by,
                 "metadata": plan.metadata,
+                "task_details": plan.task_details,
             })
 
         return {
@@ -357,6 +359,7 @@ class WorkflowManager:
                 is_superseded=plan_data.get("is_superseded", False),
                 superseded_by=plan_data.get("superseded_by"),
                 metadata=plan_data.get("metadata", {}),
+                task_details=plan_data.get("task_details", {}),
             )
             mgr._plans[workflow.id].append(plan)
 
