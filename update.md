@@ -1225,7 +1225,7 @@
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_16.zip`.
 - **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning Correction #17.
 
-## 2026-10-03 — CLI / TUI Stage 7: Correction #17 (Verification as a First-Class Boundary + Controlled Bounded Recovery)
+### 2026-10-03 — CLI / TUI Stage 7: Correction #17 (Verification as a First-Class Boundary + Controlled Bounded Recovery)
 
 - **Status**: Completed and Verified.
 - **Implemented**:
@@ -1294,7 +1294,7 @@
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_17.zip`.
 - **Next Authorized Milestone**: Proceed to Correction #18.
 
-## 2026-10-03 — CLI / TUI Stage 7: Correction #18 (Agent Roles / Subagents Architecture)
+### 2026-10-03 — CLI / TUI Stage 7: Correction #18 (Agent Roles / Subagents Architecture)
 
 - **Status**: Completed and Verified.
 - **Implemented**:
@@ -1418,7 +1418,7 @@
   - 46 new focused tests (26 workspace, 15 tools, 5 integration).
   - Full test suite: **952 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_19.zip`.
-- **Next Authorized Milestone**: Completed.
+- **Next Authorized Milestone**: Proceed to Correction #20.
 
 ### 2026-10-03 — CLI / TUI Stage 7: Correction #20 (TUI Activity System)
 - **Status**: COMPLETED
@@ -1455,4 +1455,54 @@
   - 33 new focused tests in `tests/tui/test_activity_stream.py` covering all 11 requirements.
   - Complete test suite: **985 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
 - **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_20.zip`.
-- **Next Authorized Milestone**: Absolute STOP. Await user review and authorization before beginning next phase.
+- **Next Authorized Milestone**: Proceed to Correction #21.
+
+### 2026-10-03 — CLI / TUI Stage 7: Correction #21 (Session / Persistence & Runtime Resume)
+- **Status**: COMPLETED
+- **Goal**: Add durable session state and runtime-level resumption for interrupted runs without coupling persistence to the TUI or creating database dependencies.
+- **Architectural Enhancements**:
+  - **Dedicated Session Subsystem (`clairecoder.session`)**:
+    - `SessionStatus` enum: `ACTIVE`, `COMPLETED`, `FAILED`, `INTERRUPTED`.
+    - Typed models: `SessionMetadata`, `SessionRunState`, `ChangeSetReference`, and `Session` with `schema_version = 1`.
+    - Schema versioning and migration readiness: `CURRENT_SCHEMA_VERSION = 1`, `UnsupportedSchemaVersionError` on version mismatch.
+    - Explicit serialization and deserialization (`to_dict` / `from_dict`) with backward compatibility for legacy session representations.
+  - **Local Filesystem Atomic Store (`clairecoder.session.store.SessionStore`)**:
+    - Layout: `.clairecoder/sessions/<session-id>.json`.
+    - Atomic write protocol: writes to temporary file (`.<id>.tmp.json`) -> flush -> `os.fsync` -> `os.replace` to destination file. Protects existing valid sessions against power cuts, disk full, or midway failures.
+    - Methods: `create()`, `get()`, `save()`, `list()`, `delete()`, `exists()`.
+  - **Structured Error Hierarchy (`clairecoder.session.errors`)**:
+    - `SessionError` (base), `SessionNotFoundError`, `SessionCorruptedError`, `UnsupportedSchemaVersionError`, `SessionStorageError`.
+    - Malformed JSON, corrupted schemas, and missing session files produce structured, readable errors instead of silent fallbacks or blank sessions.
+  - **AgentRuntime Persistence & Checkpointing**:
+    - Persistence integrated at meaningful runtime boundaries: session created, run started, task started, changeset/execution completed, verification passed/failed, recovery/replan completed, run completed/failed/interrupted.
+    - Non-fatal containment: persistence errors emit `AGENT_ERROR` and log structured warnings without crashing execution.
+    - Interruption safety: SIGINT / `KeyboardInterrupt` triggers immediate safe checkpoint marked `SessionStatus.INTERRUPTED` with `SESSION_INTERRUPTED` event emitted.
+  - **Runtime Resumption (`AgentRuntime.resume_session`)**:
+    - Restores `TaskGraph` state from session.
+    - Re-execution guard: skips already completed and verified tasks.
+    - In-flight task sanitization: safely resets unfinished in-flight tasks to `READY` to resume execution without duplicate work.
+  - **Event Protocol & Presentation Boundary**:
+    - Integrated with existing `RuntimeEvent` protocol: added `session_id` field and lifecycle events (`SESSION_CREATED`, `SESSION_RESUMED`, `SESSION_CHECKPOINTED`, `SESSION_COMPLETED`, `SESSION_FAILED`, `SESSION_INTERRUPTED`).
+    - CLI commands and options: `--resume <SESSION_ID>`, `--list-sessions`, `--inspect-session <SESSION_ID>`.
+    - TUI maintains strict presentation-only boundary.
+- **Files Created**:
+  - `src/clairecoder/session/__init__.py`
+  - `src/clairecoder/session/errors.py`
+  - `src/clairecoder/session/types.py`
+  - `src/clairecoder/session/store.py`
+  - `tests/session/__init__.py`
+  - `tests/session/test_session_persistence.py`
+- **Files Modified**:
+  - `src/clairecoder/runtime/events.py`
+  - `src/clairecoder/runtime/agent_runtime.py`
+  - `src/clairecoder/app.py`
+  - `src/clairecoder/cli/main.py`
+  - `src/clairecoder/tui/activity_mapper.py`
+  - `src/clairecoder/engine/engine.py`
+  - `memory.md`
+  - `update.md`
+- **Tests**:
+  - 16 new comprehensive tests in `tests/session/test_session_persistence.py`.
+  - Complete test suite: **1001 passed, 0 failures, 0 errors, 0 warnings** (`pytest -W error`).
+- **Artifacts Generated**: `Phase_CLI_TUI_Stage_7_Correction_21.zip`.
+- **Next Authorized Milestone**: Proceed to Correction #22.

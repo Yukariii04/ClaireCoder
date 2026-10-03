@@ -67,6 +67,21 @@ from clairecoder.runtime.roles import (
     VerifierRole,
     RecoveryRole,
 )
+from clairecoder.session.types import (
+    ChangeSetReference,
+    Session,
+    SessionMetadata,
+    SessionRunState,
+    SessionStatus,
+)
+from clairecoder.session.store import SessionStore
+from clairecoder.session.errors import (
+    SessionCorruptedError,
+    SessionError,
+    SessionNotFoundError,
+    SessionStorageError,
+    UnsupportedSchemaVersionError,
+)
 
 
 # =============================================================================
@@ -121,6 +136,7 @@ class AgentRuntime:
         role_registry: Optional[RoleRegistry] = None,
         workspace: Optional[Any] = None,
         tool_registry: Optional[Any] = None,
+        session_store: Optional[SessionStore] = None,
     ) -> None:
         self._planner = planner if planner is not None else Planner()
         self._executor = executor
@@ -153,6 +169,17 @@ class AgentRuntime:
         self._changeset_store = changeset_store if changeset_store is not None else ChangeSetStore()
         self._max_task_retries = max_task_retries
         self._role_registry = role_registry if role_registry is not None else self._build_default_registry()
+
+        # SessionStore boundary (Correction #21)
+        if session_store is not None:
+            self._session_store = session_store
+        else:
+            self._session_store = SessionStore(workspace_root=self._workspace_root)
+
+    @property
+    def session_store(self) -> SessionStore:
+        """Access the session store abstraction."""
+        return self._session_store
 
     @property
     def event_emitter(self) -> EventEmitter:
@@ -400,6 +427,71 @@ class AgentRuntime:
         retries_done = max(0, task.attempts - 1)
         return retries_done < limit
 
+    def _sync_session_changesets(self, session: Session) -> None:
+        """Update session changeset references from changeset store (Correction #16, #21)."""
+        all_cs = self._changeset_store.list_changesets()
+        session.changesets = [
+            ChangeSetReference(
+                changeset_id=cs.id,
+                task_id=cs.task_id,
+                status=cs.status.value if hasattr(cs.status, "value") else str(cs.status),
+                files_count=len(cs.files),
+                additions=cs.total_additions,
+                deletions=cs.total_deletions,
+                created_at=cs.created_at,
+            )
+            for cs in all_cs
+        ]
+
+    def _checkpoint_session(
+        self,
+        session: Session,
+        run_id: Optional[str] = None,
+        graph: Optional[TaskGraph] = None,
+        extra_payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist session checkpoint and emit SESSION_CHECKPOINTED event (Correction #21 §5, §8)."""
+        session.touch()
+        if graph is not None:
+            session.task_graph_state = graph.to_dict()
+        if run_id:
+            session.current_run_id = run_id
+
+        # Update changeset references
+        self._sync_session_changesets(session)
+
+        # Attempt atomic filesystem persistence
+        if self._session_store is not None:
+            try:
+                self._session_store.save(session)
+            except Exception as e:
+                # Structured error containment — persistence failure does not crash the runtime
+                self._emit(
+                    EventType.AGENT_ERROR,
+                    session_id=session.session_id,
+                    run_id=run_id or session.current_run_id,
+                    payload={"error": f"Session checkpoint persistence failed: {e}", "details": str(e)},
+                )
+
+        # Emit SESSION_CHECKPOINTED
+        payload = {
+            "session_id": session.session_id,
+            "status": session.status.value,
+            "turn_count": session.turn_count,
+            "current_task_id": session.current_task_id,
+            "tasks_total": len(graph.tasks) if graph else 0,
+            "tasks_completed": sum(1 for t in graph.tasks if t.status == TaskState.SUCCEEDED) if graph else 0,
+        }
+        if extra_payload:
+            payload.update(extra_payload)
+
+        self._emit(
+            EventType.SESSION_CHECKPOINTED,
+            session_id=session.session_id,
+            run_id=run_id or session.current_run_id,
+            payload=payload,
+        )
+
     # =========================================================================
     # PRIMARY EXECUTION ENTRY POINT
     # =========================================================================
@@ -456,9 +548,33 @@ class AgentRuntime:
         if not active_model:
             active_model = self._resolve_model(session_id)
 
+        # Resolve or initialize session state (Correction #21)
+        session: Optional[Session] = None
+        if self._session_store:
+            session = Session(
+                session_id=session_id,
+                workspace_root=self._workspace_root,
+                original_objective=objective_req,
+                status=SessionStatus.ACTIVE,
+                metadata=SessionMetadata(active_model=active_model),
+            )
+            self._emit(
+                EventType.SESSION_CREATED,
+                session_id=session_id,
+                run_id=run_id,
+                objective_id=objective_id,
+                payload={
+                    "session_id": session_id,
+                    "objective": objective_req,
+                    "workspace_root": self._workspace_root,
+                },
+            )
+            self._checkpoint_session(session, run_id=run_id, graph=task_graph)
+
         # 1. Emit RUN_STARTED
         self._emit(
             EventType.RUN_STARTED,
+            session_id=session_id,
             run_id=run_id,
             objective_id=objective_id,
             payload={
@@ -468,6 +584,12 @@ class AgentRuntime:
                 "request": objective_req,
             },
         )
+
+        if session:
+            session.status = SessionStatus.ACTIVE
+            session.current_run_id = run_id
+            session.turn_count += 1
+            self._checkpoint_session(session, run_id=run_id, graph=task_graph)
 
         # Context assembly & understanding via EngineeringEngine if present
         if self._engineering_engine and session_id:
@@ -487,8 +609,21 @@ class AgentRuntime:
             provided_graph=task_graph,
         )
 
+        if session:
+            self._checkpoint_session(session, run_id=run_id, graph=graph)
+
         if plan is None and task_graph is None and graph.has_failures():
             # Planning failed fatally before execution started
+            if session:
+                session.status = SessionStatus.FAILED
+                self._checkpoint_session(session, run_id=run_id, graph=graph)
+                self._emit(
+                    EventType.SESSION_FAILED,
+                    session_id=session.session_id,
+                    run_id=run_id,
+                    objective_id=objective_id,
+                    payload={"session_id": session.session_id, "reason": "Planning failed", "status": "failed"},
+                )
             if self._workflow_manager:
                 wf = self._workflow_manager.get_workflow(workflow_id)
                 if wf and wf.state == WorkflowState.CREATED:
@@ -507,219 +642,221 @@ class AgentRuntime:
         has_recovered_attempts = False
         verification_results: Dict[str, VerificationResult] = {}
 
-        while not graph.all_completed() and cycles < max_cycles:
-            cycles += 1
+        try:
+            while not graph.all_completed() and cycles < max_cycles:
+                cycles += 1
 
-            # Cancellation & interruption check
-            if self._is_cancelled(session_id, objective):
-                self._emit(
-                    EventType.RUN_CANCELLED,
-                    run_id=run_id,
-                    objective_id=objective_id,
-                    payload={"run_id": run_id, "objective_id": objective_id},
-                )
-                if self._engineering_engine and session_id:
-                    self._engineering_engine.cancel_objective(session_id)
-                return self._build_result(
-                    success=False,
-                    run_id=run_id,
-                    objective_id=objective_id,
-                    graph=graph,
-                    failure_reason="Execution interrupted or cancelled by user",
-                    execution_success=False,
-                    verification_success=False,
-                    verification_results=verification_results,
-                )
-
-            ready_tasks = graph.get_ready_tasks()
-
-            if not ready_tasks:
-                if graph.has_failures():
-                    # Check if replanning is allowed
-                    if replan_count < max_replans and self._can_replan(has_provided_graph=(task_graph is not None)):
-                        replan_count += 1
+                # Cancellation & interruption check
+                if self._is_cancelled(session_id, objective):
+                    if session:
+                        session.status = SessionStatus.INTERRUPTED
+                        self._checkpoint_session(session, run_id=run_id, graph=graph)
                         self._emit(
-                            EventType.RECOVERY_STARTED,
+                            EventType.SESSION_INTERRUPTED,
+                            session_id=session.session_id,
                             run_id=run_id,
                             objective_id=objective_id,
-                            payload={
-                                "recovery_type": "replan",
-                                "replan_count": replan_count,
-                                "max_replans": max_replans,
-                            },
+                            payload={"session_id": session.session_id, "reason": "Cancelled"},
                         )
-                        self._emit(
-                            EventType.REPLAN_STARTED,
-                            run_id=run_id,
-                            objective_id=objective_id,
-                            payload={
-                                "replan_count": replan_count,
-                                "max_replans": max_replans,
-                            },
-                        )
-                        new_graph, new_plan = self._replan(
-                            objective_req=objective_req,
-                            objective_id=objective_id,
-                            workflow_id=workflow_id,
-                            session_id=session_id,
-                            run_id=run_id,
-                            active_model=active_model,
-                            current_graph=graph,
-                            current_plan=plan,
-                            replan_count=replan_count,
-                        )
-                        if new_graph:
-                            graph = new_graph
-                            plan = new_plan
-                            has_recovered_attempts = True
-                            continue
-                        else:
+                    self._emit(
+                        EventType.RUN_CANCELLED,
+                        session_id=session.session_id if session else session_id,
+                        run_id=run_id,
+                        objective_id=objective_id,
+                        payload={"run_id": run_id, "objective_id": objective_id},
+                    )
+                    if self._engineering_engine and session_id:
+                        self._engineering_engine.cancel_objective(session_id)
+                    return self._build_result(
+                        success=False,
+                        run_id=run_id,
+                        objective_id=objective_id,
+                        graph=graph,
+                        failure_reason="Execution interrupted or cancelled by user",
+                        execution_success=False,
+                        verification_success=False,
+                        verification_results=verification_results,
+                    )
+
+                ready_tasks = graph.get_ready_tasks()
+
+                if not ready_tasks:
+                    if graph.has_failures():
+                        # Check if replanning is allowed
+                        if replan_count < max_replans and self._can_replan(has_provided_graph=(task_graph is not None)):
+                            replan_count += 1
                             self._emit(
-                                EventType.RECOVERY_FAILED,
+                                EventType.RECOVERY_STARTED,
+                                session_id=session_id,
                                 run_id=run_id,
                                 objective_id=objective_id,
                                 payload={
                                     "recovery_type": "replan",
                                     "replan_count": replan_count,
-                                    "reason": "Replanning failed to generate a new graph",
+                                    "max_replans": max_replans,
                                 },
                             )
+                            self._emit(
+                                EventType.REPLAN_STARTED,
+                                session_id=session_id,
+                                run_id=run_id,
+                                objective_id=objective_id,
+                                payload={
+                                    "replan_count": replan_count,
+                                    "max_replans": max_replans,
+                                },
+                            )
+                            new_graph, new_plan = self._replan(
+                                objective_req=objective_req,
+                                objective_id=objective_id,
+                                workflow_id=workflow_id,
+                                session_id=session_id,
+                                run_id=run_id,
+                                active_model=active_model,
+                                current_graph=graph,
+                                current_plan=plan,
+                                replan_count=replan_count,
+                            )
+                            if new_graph:
+                                graph = new_graph
+                                plan = new_plan
+                                has_recovered_attempts = True
+                                if session:
+                                    session.recovery_state["replan"] = {
+                                        "replan_count": replan_count,
+                                        "status": "completed",
+                                    }
+                                    self._checkpoint_session(session, run_id=run_id, graph=new_graph)
+                                continue
+                            else:
+                                self._emit(
+                                    EventType.RECOVERY_FAILED,
+                                    session_id=session_id,
+                                    run_id=run_id,
+                                    objective_id=objective_id,
+                                    payload={
+                                        "recovery_type": "replan",
+                                        "replan_count": replan_count,
+                                        "reason": "Replanning failed to generate a new graph",
+                                    },
+                                )
 
-                    # No replans remain — terminal failure
-                    if replan_count > 0 or has_recovered_attempts:
-                        self._emit(
-                            EventType.RECOVERY_FAILED,
-                            run_id=run_id,
-                            objective_id=objective_id,
-                            payload={
-                                "recovery_type": "replan" if replan_count > 0 else "retry",
-                                "reason": "Recovery exhausted: all retries and replans completed without success",
-                            },
+                        # No replans remain — terminal failure
+                        if replan_count > 0 or has_recovered_attempts:
+                            self._emit(
+                                EventType.RECOVERY_FAILED,
+                                session_id=session_id,
+                                run_id=run_id,
+                                objective_id=objective_id,
+                                payload={
+                                    "recovery_type": "replan" if replan_count > 0 else "retry",
+                                    "reason": "Recovery exhausted: all retries and replans completed without success",
+                                },
+                            )
+                        break
+                    else:
+                        # No ready tasks and no failures (e.g. empty or unresolvable)
+                        break
+
+                # Execute ready tasks in deterministic order
+                for task in ready_tasks:
+                    if self._is_cancelled(session_id, objective):
+                        break
+
+                    task_id = task.id
+
+                    # Start Task in TaskGraph (increments attempts, emits TASK_STARTED)
+                    graph.mark_started(task_id)
+                    if session:
+                        session.current_task_id = task_id
+                        session.run_state.cycles = cycles
+                        self._checkpoint_session(session, run_id=run_id, graph=graph)
+
+                    # Sync with ExecutionManager and EngineeringEngine
+                    attempt_num = task.attempts
+                    exec_id = f"exec_{task_id}_{attempt_num}"
+                    self._sync_task_start(task, session_id, workflow_id, exec_id, attempt_num)
+
+                    # Capture workspace state BEFORE task execution (Correction #16, #19)
+                    tracker = self._workspace.create_tracker()
+                    tracker.capture_before()
+
+                    # Execute Task via Executor
+                    try:
+                        exec_result = self._execute_task(task, session_id=session_id, attempt_number=attempt_num)
+                    except Exception as e:
+                        exec_result = ExecutionResult(
+                            category=ExecutionResultCategory.FAILURE,
+                            failure_category=FailureCategory.UNKNOWN_FAILURE,
+                            error_message=str(e),
+                            failure_evidence=FailureEvidence(task_id=task_id, reason=str(e)),
+                            task_id=task_id,
                         )
-                    break
-                else:
-                    # No ready tasks and no failures (e.g. empty or unresolvable)
-                    break
 
-            # Execute ready tasks in deterministic order
-            for task in ready_tasks:
-                if self._is_cancelled(session_id, objective):
-                    break
+                    # Capture workspace state AFTER task execution & calculate changeset (Correction #16)
+                    changeset = tracker.capture_after(task_id=task_id, run_id=run_id)
+                    if not exec_result.success:
+                        changeset.status = ChangeSetStatus.FAILED
+                    else:
+                        changeset.status = ChangeSetStatus.APPLIED
 
-                task_id = task.id
+                    self._changeset_store.record_changeset(changeset)
+                    if session:
+                        self._sync_session_changesets(session)
+                        self._checkpoint_session(session, run_id=run_id, graph=graph)
 
-                # Start Task in TaskGraph (increments attempts, emits TASK_STARTED)
-                graph.mark_started(task_id)
+                    # Expose changeset_id and changed files on ExecutionResult
+                    exec_result.changeset_id = changeset.id
+                    if changeset.files:
+                        new_paths = [cf.path for cf in changeset.files]
+                        if exec_result.changed_files:
+                            all_paths = list(dict.fromkeys(exec_result.changed_files + new_paths))
+                            exec_result.changed_files = all_paths
+                        else:
+                            exec_result.changed_files = new_paths
 
-                # Sync with ExecutionManager and EngineeringEngine
-                attempt_num = task.attempts
-                exec_id = f"exec_{task_id}_{attempt_num}"
-                self._sync_task_start(task, session_id, workflow_id, exec_id, attempt_num)
-
-                # Capture workspace state BEFORE task execution (Correction #16, #19)
-                tracker = self._workspace.create_tracker()
-                tracker.capture_before()
-
-                # Execute Task via Executor
-                try:
-                    exec_result = self._execute_task(task, session_id=session_id, attempt_number=attempt_num)
-                except Exception as e:
-                    exec_result = ExecutionResult(
-                        category=ExecutionResultCategory.FAILURE,
-                        failure_category=FailureCategory.UNKNOWN_FAILURE,
-                        error_message=str(e),
-                        failure_evidence=FailureEvidence(task_id=task_id, reason=str(e)),
+                    # Emit runtime events for changeset
+                    self._emit_changeset_events(
+                        changeset=changeset,
+                        run_id=run_id,
+                        objective_id=objective_id,
                         task_id=task_id,
                     )
 
-                # Capture workspace state AFTER task execution & calculate changeset (Correction #16)
-                changeset = tracker.capture_after(task_id=task_id, run_id=run_id)
-                if not exec_result.success:
-                    changeset.status = ChangeSetStatus.FAILED
-                else:
-                    changeset.status = ChangeSetStatus.APPLIED
-
-                self._changeset_store.record_changeset(changeset)
-
-                # Expose changeset_id and changed files on ExecutionResult
-                exec_result.changeset_id = changeset.id
-                if changeset.files:
-                    new_paths = [cf.path for cf in changeset.files]
-                    if exec_result.changed_files:
-                        all_paths = list(dict.fromkeys(exec_result.changed_files + new_paths))
-                        exec_result.changed_files = all_paths
-                    else:
-                        exec_result.changed_files = new_paths
-
-                # Emit runtime events for changeset
-                self._emit_changeset_events(
-                    changeset=changeset,
-                    run_id=run_id,
-                    objective_id=objective_id,
-                    task_id=task_id,
-                )
-
-                # --- Strict Gating: Check Execution Success ---
-                if not exec_result.success:
-                    # Execution failed!
-                    # DO NOT RUN VERIFICATION. Monotonic failure gating.
-                    failure_detail = (
-                        exec_result.failure_evidence.to_summary()
-                        if exec_result.failure_evidence
-                        else (exec_result.error_message or "Execution failed")
-                    )
-                    evidence_payload = {
-                        "task_id": task_id,
-                        "kind": "execution_failure",
-                        "error": exec_result.error_message or "Execution failed",
-                        "message": exec_result.error_message or "Execution failed",
-                        "detail": failure_detail,
-                        "evidence": failure_detail,
-                        "attempt": attempt_num,
-                        "changeset_id": changeset.id,
-                        "affected_files": [cf.path for cf in changeset.files] if changeset.files else [],
-                    }
-
-                    # Mark failed in graph (emits TASK_FAILED, cascades BLOCKED to dependents)
-                    graph.mark_failed(task_id, evidence=evidence_payload)
-
-                    # Sync failure to execution manager and engine
-                    self._sync_task_failure(task_id, session_id, exec_id, exec_result)
-
-                    # Recovery: determine if retry is allowed
-                    if self._can_retry_task(task, task_retries_limit):
-                        has_recovered_attempts = True
-                        max_retries_val = self._get_max_retries(task, task_retries_limit)
-                        self._emit(
-                            EventType.RECOVERY_STARTED,
-                            run_id=run_id,
-                            objective_id=objective_id,
-                            task_id=task_id,
-                            payload={
-                                "task_id": task_id,
-                                "recovery_type": "retry",
-                                "attempt": attempt_num,
-                                "max_retries": max_retries_val,
-                                "failure": evidence_payload,
-                            },
+                    # --- Strict Gating: Check Execution Success ---
+                    if not exec_result.success:
+                        # Execution failed!
+                        # DO NOT RUN VERIFICATION. Monotonic failure gating.
+                        failure_detail = (
+                            exec_result.failure_evidence.to_summary()
+                            if exec_result.failure_evidence
+                            else (exec_result.error_message or "Execution failed")
                         )
-                        self._emit(
-                            EventType.RETRY_STARTED,
-                            run_id=run_id,
-                            objective_id=objective_id,
-                            task_id=task_id,
-                            payload={
-                                "task_id": task_id,
-                                "attempt": attempt_num + 1,
-                                "max_retries": max_retries_val,
-                            },
-                        )
-                        graph.mark_retrying(task_id)
-                        continue
-                    else:
-                        if attempt_num > 1:
+                        evidence_payload = {
+                            "task_id": task_id,
+                            "kind": "execution_failure",
+                            "error": exec_result.error_message or "Execution failed",
+                            "message": exec_result.error_message or "Execution failed",
+                            "detail": failure_detail,
+                            "evidence": failure_detail,
+                            "attempt": attempt_num,
+                            "changeset_id": changeset.id,
+                            "affected_files": [cf.path for cf in changeset.files] if changeset.files else [],
+                        }
+
+                        # Mark failed in graph (emits TASK_FAILED, cascades BLOCKED to dependents)
+                        graph.mark_failed(task_id, evidence=evidence_payload)
+
+                        # Sync failure to execution manager and engine
+                        self._sync_task_failure(task_id, session_id, exec_id, exec_result)
+
+                        # Recovery: determine if retry is allowed
+                        if self._can_retry_task(task, task_retries_limit):
+                            has_recovered_attempts = True
+                            max_retries_val = self._get_max_retries(task, task_retries_limit)
                             self._emit(
-                                EventType.RECOVERY_FAILED,
+                                EventType.RECOVERY_STARTED,
+                                session_id=session_id,
                                 run_id=run_id,
                                 objective_id=objective_id,
                                 task_id=task_id,
@@ -727,165 +864,192 @@ class AgentRuntime:
                                     "task_id": task_id,
                                     "recovery_type": "retry",
                                     "attempt": attempt_num,
-                                    "reason": f"Retry budget exhausted after {attempt_num} attempts",
+                                    "max_retries": max_retries_val,
                                     "failure": evidence_payload,
                                 },
                             )
-                        continue
-
-                # --- Execution Succeeded -> Transition to EXECUTED then VERIFYING ---
-                graph.mark_executed(task_id)
-                graph.mark_verifying(task_id)
-
-                self._emit(
-                    EventType.VERIFICATION_STARTED,
-                    run_id=run_id,
-                    objective_id=objective_id,
-                    task_id=task_id,
-                    payload={
-                        "task_id": task_id,
-                        "title": task.title,
-                        "changeset_id": changeset.id if changeset else None,
-                    },
-                )
-                if self._workflow_manager:
-                    wf = self._workflow_manager.get_workflow(workflow_id)
-                    if wf and wf.state != WorkflowState.VALIDATING:
-                        self._workflow_manager.transition_state(workflow_id, WorkflowState.VALIDATING)
-
-                try:
-                    ver_result = self._verify_task(
-                        task,
-                        exec_result,
-                        changeset=changeset,
-                        session_id=session_id,
-                        attempt_number=attempt_num,
-                    )
-                    passed = ver_result.success if hasattr(ver_result, "success") else bool(ver_result)
-                except Exception as e:
-                    ver_result = VerificationResult(
-                        task_id=task_id,
-                        success=False,
-                        status=VerificationStatus.FAILED,
-                        failures=[str(e)],
-                        evidence=[f"Verification error: {e}"],
-                        changeset_id=changeset.id if changeset else None,
-                    )
-                    passed = False
-
-                if isinstance(ver_result, VerificationResult):
-                    verification_results[task_id] = ver_result
-
-                if passed:
-                    self._emit(
-                        EventType.VERIFICATION_PASSED,
-                        run_id=run_id,
-                        objective_id=objective_id,
-                        task_id=task_id,
-                        payload={
-                            "task_id": task_id,
-                            "passed": True,
-                            "checks": getattr(ver_result, "checks", []),
-                            "evidence": getattr(ver_result, "evidence", []),
-                            "changeset_id": getattr(ver_result, "changeset_id", None),
-                        },
-                    )
-                    self._emit(
-                        EventType.VERIFICATION_COMPLETED,
-                        run_id=run_id,
-                        objective_id=objective_id,
-                        task_id=task_id,
-                        payload={
-                            "task_id": task_id,
-                            "passed": True,
-                            "checks": getattr(ver_result, "checks", []),
-                        },
-                    )
-                    # Complete task in graph (emits TASK_COMPLETED, unlocks dependents to READY)
-                    graph.mark_completed(task_id)
-                    self._sync_task_success(task_id, session_id, exec_id, exec_result)
-
-                    if task.attempts > 1:
-                        has_recovered_attempts = True
-                        self._emit(
-                            EventType.RECOVERY_COMPLETED,
-                            run_id=run_id,
-                            objective_id=objective_id,
-                            task_id=task_id,
-                            payload={
-                                "task_id": task_id,
-                                "recovery_type": "retry",
-                                "attempt": task.attempts,
-                            },
-                        )
-                else:
-                    failures_list = getattr(ver_result, "failures", []) or ["Verification failed"]
-                    evidence_list = getattr(ver_result, "evidence", [])
-                    self._emit(
-                        EventType.VERIFICATION_FAILED,
-                        run_id=run_id,
-                        objective_id=objective_id,
-                        task_id=task_id,
-                        payload={
-                            "task_id": task_id,
-                            "passed": False,
-                            "failures": failures_list,
-                            "evidence": evidence_list,
-                            "changeset_id": getattr(ver_result, "changeset_id", None),
-                        },
-                    )
-                    ver_evidence = {
-                        "task_id": task_id,
-                        "kind": "verification_failure",
-                        "error": "; ".join(str(f) for f in failures_list) if failures_list else "Verification failed",
-                        "message": "; ".join(str(f) for f in failures_list) if failures_list else "Verification failed",
-                        "detail": str(ver_result),
-                        "evidence": evidence_list or str(ver_result),
-                        "failures": failures_list,
-                        "attempt": attempt_num,
-                        "changeset_id": changeset.id if changeset else None,
-                        "affected_files": [cf.path for cf in changeset.files] if changeset and changeset.files else [],
-                    }
-                    exec_result.category = ExecutionResultCategory.FAILURE
-                    exec_result.failure_category = FailureCategory.VALIDATION_FAILURE
-                    # Mark failed in graph (emits TASK_FAILED, cascades BLOCKED to dependents)
-                    graph.mark_failed(task_id, evidence=ver_evidence)
-                    self._sync_task_verification_failure(task_id, session_id, exec_id, exec_result)
-
-                    # Recovery: determine if retry is allowed
-                    if self._can_retry_task(task, task_retries_limit):
-                        has_recovered_attempts = True
-                        max_retries_val = self._get_max_retries(task, task_retries_limit)
-                        self._emit(
-                            EventType.RECOVERY_STARTED,
-                            run_id=run_id,
-                            objective_id=objective_id,
-                            task_id=task_id,
-                            payload={
-                                "task_id": task_id,
-                                "recovery_type": "retry",
-                                "attempt": attempt_num,
-                                "max_retries": max_retries_val,
-                                "failure": ver_evidence,
-                            },
-                        )
-                        self._emit(
-                            EventType.RETRY_STARTED,
-                            run_id=run_id,
-                            objective_id=objective_id,
-                            task_id=task_id,
-                            payload={
-                                "task_id": task_id,
-                                "attempt": attempt_num + 1,
-                                "max_retries": max_retries_val,
-                            },
-                        )
-                        graph.mark_retrying(task_id)
-                        continue
-                    else:
-                        if attempt_num > 1:
                             self._emit(
-                                EventType.RECOVERY_FAILED,
+                                EventType.RETRY_STARTED,
+                                session_id=session_id,
+                                run_id=run_id,
+                                objective_id=objective_id,
+                                task_id=task_id,
+                                payload={
+                                    "task_id": task_id,
+                                    "attempt": attempt_num + 1,
+                                    "max_retries": max_retries_val,
+                                },
+                            )
+                            graph.mark_retrying(task_id)
+                            if session:
+                                session.recovery_state[task_id] = {
+                                    "action": "retry",
+                                    "attempt": attempt_num + 1,
+                                }
+                                self._checkpoint_session(session, run_id=run_id, graph=graph)
+                            continue
+                        else:
+                            if attempt_num > 1:
+                                self._emit(
+                                    EventType.RECOVERY_FAILED,
+                                    session_id=session_id,
+                                    run_id=run_id,
+                                    objective_id=objective_id,
+                                    task_id=task_id,
+                                    payload={
+                                        "task_id": task_id,
+                                        "recovery_type": "retry",
+                                        "attempt": attempt_num,
+                                        "reason": f"Retry budget exhausted after {attempt_num} attempts",
+                                        "failure": evidence_payload,
+                                    },
+                                )
+                            continue
+
+                    # --- Execution Succeeded -> Transition to EXECUTED then VERIFYING ---
+                    graph.mark_executed(task_id)
+                    graph.mark_verifying(task_id)
+
+                    self._emit(
+                        EventType.VERIFICATION_STARTED,
+                        session_id=session_id,
+                        run_id=run_id,
+                        objective_id=objective_id,
+                        task_id=task_id,
+                        payload={
+                            "task_id": task_id,
+                            "title": task.title,
+                            "changeset_id": changeset.id if changeset else None,
+                        },
+                    )
+                    if self._workflow_manager:
+                        wf = self._workflow_manager.get_workflow(workflow_id)
+                        if wf and wf.state != WorkflowState.VALIDATING:
+                            self._workflow_manager.transition_state(workflow_id, WorkflowState.VALIDATING)
+
+                    try:
+                        ver_result = self._verify_task(
+                            task,
+                            exec_result,
+                            changeset=changeset,
+                            session_id=session_id,
+                            attempt_number=attempt_num,
+                        )
+                        passed = ver_result.success if hasattr(ver_result, "success") else bool(ver_result)
+                    except Exception as e:
+                        ver_result = VerificationResult(
+                            task_id=task_id,
+                            success=False,
+                            status=VerificationStatus.FAILED,
+                            failures=[str(e)],
+                            evidence=[f"Verification error: {e}"],
+                            changeset_id=changeset.id if changeset else None,
+                        )
+                        passed = False
+
+                    if isinstance(ver_result, VerificationResult):
+                        verification_results[task_id] = ver_result
+
+                    if passed:
+                        self._emit(
+                            EventType.VERIFICATION_PASSED,
+                            session_id=session_id,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            task_id=task_id,
+                            payload={
+                                "task_id": task_id,
+                                "passed": True,
+                                "checks": getattr(ver_result, "checks", []),
+                                "evidence": getattr(ver_result, "evidence", []),
+                                "changeset_id": getattr(ver_result, "changeset_id", None),
+                            },
+                        )
+                        self._emit(
+                            EventType.VERIFICATION_COMPLETED,
+                            session_id=session_id,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            task_id=task_id,
+                            payload={
+                                "task_id": task_id,
+                                "passed": True,
+                                "checks": getattr(ver_result, "checks", []),
+                            },
+                        )
+                        # Complete task in graph (emits TASK_COMPLETED, unlocks dependents to READY)
+                        graph.mark_completed(task_id)
+                        self._sync_task_success(task_id, session_id, exec_id, exec_result)
+                        if session:
+                            session.verification_state[task_id] = {
+                                "status": "passed",
+                                "attempt": task.attempts,
+                            }
+                            self._checkpoint_session(session, run_id=run_id, graph=graph)
+
+                        if task.attempts > 1:
+                            has_recovered_attempts = True
+                            self._emit(
+                                EventType.RECOVERY_COMPLETED,
+                                session_id=session_id,
+                                run_id=run_id,
+                                objective_id=objective_id,
+                                task_id=task_id,
+                                payload={
+                                    "task_id": task_id,
+                                    "recovery_type": "retry",
+                                    "attempt": task.attempts,
+                                },
+                            )
+                    else:
+                        failures_list = getattr(ver_result, "failures", []) or ["Verification failed"]
+                        evidence_list = getattr(ver_result, "evidence", [])
+                        self._emit(
+                            EventType.VERIFICATION_FAILED,
+                            session_id=session_id,
+                            run_id=run_id,
+                            objective_id=objective_id,
+                            task_id=task_id,
+                            payload={
+                                "task_id": task_id,
+                                "passed": False,
+                                "failures": failures_list,
+                                "evidence": evidence_list,
+                                "changeset_id": getattr(ver_result, "changeset_id", None),
+                            },
+                        )
+                        ver_evidence = {
+                            "task_id": task_id,
+                            "kind": "verification_failure",
+                            "error": "; ".join(str(f) for f in failures_list) if failures_list else "Verification failed",
+                            "message": "; ".join(str(f) for f in failures_list) if failures_list else "Verification failed",
+                            "detail": str(ver_result),
+                            "evidence": evidence_list or str(ver_result),
+                            "failures": failures_list,
+                            "attempt": attempt_num,
+                            "changeset_id": changeset.id if changeset else None,
+                            "affected_files": [cf.path for cf in changeset.files] if changeset and changeset.files else [],
+                        }
+                        exec_result.category = ExecutionResultCategory.FAILURE
+                        exec_result.failure_category = FailureCategory.VALIDATION_FAILURE
+                        # Mark failed in graph (emits TASK_FAILED, cascades BLOCKED to dependents)
+                        graph.mark_failed(task_id, evidence=ver_evidence)
+                        self._sync_task_verification_failure(task_id, session_id, exec_id, exec_result)
+                        if session:
+                            session.verification_state[task_id] = {
+                                "status": "failed",
+                                "failures": failures_list,
+                                "attempt": task.attempts,
+                            }
+                            self._checkpoint_session(session, run_id=run_id, graph=graph)
+
+                        # Recovery: determine if retry is allowed
+                        if self._can_retry_task(task, task_retries_limit):
+                            has_recovered_attempts = True
+                            max_retries_val = self._get_max_retries(task, task_retries_limit)
+                            self._emit(
+                                EventType.RECOVERY_STARTED,
+                                session_id=session_id,
                                 run_id=run_id,
                                 objective_id=objective_id,
                                 task_id=task_id,
@@ -893,11 +1057,76 @@ class AgentRuntime:
                                     "task_id": task_id,
                                     "recovery_type": "retry",
                                     "attempt": attempt_num,
-                                    "reason": f"Retry budget exhausted after {attempt_num} attempts",
+                                    "max_retries": max_retries_val,
                                     "failure": ver_evidence,
                                 },
                             )
-                        continue
+                            self._emit(
+                                EventType.RETRY_STARTED,
+                                session_id=session_id,
+                                run_id=run_id,
+                                objective_id=objective_id,
+                                task_id=task_id,
+                                payload={
+                                    "task_id": task_id,
+                                    "attempt": attempt_num + 1,
+                                    "max_retries": max_retries_val,
+                                },
+                            )
+                            graph.mark_retrying(task_id)
+                            if session:
+                                session.recovery_state[task_id] = {
+                                    "action": "retry",
+                                    "attempt": attempt_num + 1,
+                                }
+                                self._checkpoint_session(session, run_id=run_id, graph=graph)
+                            continue
+                        else:
+                            if attempt_num > 1:
+                                self._emit(
+                                    EventType.RECOVERY_FAILED,
+                                    session_id=session_id,
+                                    run_id=run_id,
+                                    objective_id=objective_id,
+                                    task_id=task_id,
+                                    payload={
+                                        "task_id": task_id,
+                                        "recovery_type": "retry",
+                                        "attempt": attempt_num,
+                                        "reason": f"Retry budget exhausted after {attempt_num} attempts",
+                                        "failure": ver_evidence,
+                                    },
+                                )
+                            continue
+        except KeyboardInterrupt:
+            # Clean interruption handling (Correction #21 §7)
+            if session:
+                session.status = SessionStatus.INTERRUPTED
+                self._checkpoint_session(session, run_id=run_id, graph=graph)
+                self._emit(
+                    EventType.SESSION_INTERRUPTED,
+                    session_id=session.session_id,
+                    run_id=run_id,
+                    objective_id=objective_id,
+                    payload={"session_id": session.session_id, "reason": "KeyboardInterrupt"},
+                )
+            self._emit(
+                EventType.RUN_CANCELLED,
+                session_id=session.session_id if session else session_id,
+                run_id=run_id,
+                objective_id=objective_id,
+                payload={"run_id": run_id, "objective_id": objective_id, "reason": "Interrupted"},
+            )
+            return self._build_result(
+                success=False,
+                run_id=run_id,
+                objective_id=objective_id,
+                graph=graph,
+                failure_reason="Execution interrupted by user (Ctrl+C)",
+                execution_success=False,
+                verification_success=False,
+                verification_results=verification_results,
+            )
 
         # 4. Final Completion Determination (Section 11)
         any_failed = any(t.status == TaskState.FAILED for t in graph.tasks)
@@ -936,6 +1165,7 @@ class AgentRuntime:
             if has_recovered_attempts or replan_count > 0:
                 self._emit(
                     EventType.RECOVERY_COMPLETED,
+                    session_id=session_id,
                     run_id=run_id,
                     objective_id=objective_id,
                     payload={
@@ -945,8 +1175,21 @@ class AgentRuntime:
                     },
                 )
 
+            if session:
+                session.status = SessionStatus.COMPLETED
+                session.current_task_id = None
+                self._checkpoint_session(session, run_id=run_id, graph=graph)
+                self._emit(
+                    EventType.SESSION_COMPLETED,
+                    session_id=session.session_id,
+                    run_id=run_id,
+                    objective_id=objective_id,
+                    payload={"session_id": session.session_id, "status": "completed"},
+                )
+
             self._emit(
                 EventType.RUN_COMPLETED,
+                session_id=session_id,
                 run_id=run_id,
                 objective_id=objective_id,
                 payload={
@@ -1008,8 +1251,24 @@ class AgentRuntime:
                 if graph.has_failures():
                     self._engineering_engine.fail_objective(session_id)
 
+            if session:
+                session.status = SessionStatus.FAILED
+                self._checkpoint_session(session, run_id=run_id, graph=graph)
+                self._emit(
+                    EventType.SESSION_FAILED,
+                    session_id=session.session_id,
+                    run_id=run_id,
+                    objective_id=objective_id,
+                    payload={
+                        "session_id": session.session_id,
+                        "reason": reason,
+                        "status": "failed",
+                    },
+                )
+
             self._emit(
                 EventType.RUN_FAILED,
+                session_id=session_id,
                 run_id=run_id,
                 objective_id=objective_id,
                 payload={
@@ -1032,6 +1291,77 @@ class AgentRuntime:
                 recovered_success=False,
                 verification_results=verification_results,
             )
+
+    # =========================================================================
+    # RESUME BOUNDARY (Correction #21 §6)
+    # =========================================================================
+
+    def resume_session(
+        self,
+        session_id: str,
+        max_cycles: int = 10,
+        max_replans: int = 2,
+        active_model: Optional[str] = None,
+        max_task_retries: Optional[int] = None,
+    ) -> RunResult:
+        """Resume an existing persisted session.
+
+        - Loads persisted Session from SessionStore (raising structured errors if missing/corrupt)
+        - Reconstructs TaskGraph from session.task_graph_state
+        - Preserves completed and verified tasks (never blindly re-executed)
+        - Resets in-flight/interrupted tasks back to READY for safe resumption
+        - Emits SESSION_RESUMED
+        - Executes runtime loop from the persisted state
+        """
+        session = self._session_store.get(session_id)
+
+        # Emit SESSION_RESUMED event
+        self._emit(
+            EventType.SESSION_RESUMED,
+            session_id=session.session_id,
+            run_id=session.current_run_id,
+            payload={
+                "session_id": session.session_id,
+                "status": session.status.value,
+                "turn_count": session.turn_count,
+                "original_objective": session.original_objective,
+            },
+        )
+
+        # Restore TaskGraph
+        graph = None
+        if session.task_graph_state:
+            graph = TaskGraph.from_dict(
+                session.task_graph_state,
+                event_emitter=self._event_emitter,
+                run_id=session.current_run_id,
+            )
+
+            # Sanitize in-flight / interrupted tasks:
+            # Completed & verified tasks (SUCCEEDED) must NOT be blindly re-executed!
+            # Tasks that were in RUNNING, VERIFYING, or EXECUTED when interrupted
+            # are reset to READY so they can resume execution cleanly.
+            for task in graph.tasks:
+                if task.status in (TaskState.RUNNING, TaskState.VERIFYING, TaskState.EXECUTED):
+                    task.status = TaskState.READY
+
+            # Re-finalize graph to validate dependencies and ensure readiness is set
+            graph.finalize()
+
+        # Mark session active again
+        session.status = SessionStatus.ACTIVE
+        self._checkpoint_session(session, graph=graph)
+
+        # Continue execution with existing graph and session objective
+        return self.run(
+            objective=session.original_objective,
+            session_id=session.session_id,
+            task_graph=graph,
+            max_cycles=max_cycles,
+            max_replans=max_replans,
+            active_model=active_model or session.metadata.active_model,
+            max_task_retries=max_task_retries,
+        )
 
     # =========================================================================
     # PLANNING BOUNDARY (Section 14)
@@ -1576,6 +1906,7 @@ class AgentRuntime:
     def _emit(
         self,
         event_type: EventType,
+        session_id: Optional[str] = None,
         run_id: Optional[str] = None,
         objective_id: Optional[str] = None,
         task_id: Optional[str] = None,
@@ -1585,8 +1916,10 @@ class AgentRuntime:
         """Emit a structured RuntimeEvent via EventEmitter."""
         if self._event_emitter:
             try:
+                sid = session_id or (payload.get("session_id") if payload else None)
                 event = RuntimeEvent(
                     event_type=event_type,
+                    session_id=sid,
                     run_id=run_id,
                     objective_id=objective_id,
                     task_id=task_id,

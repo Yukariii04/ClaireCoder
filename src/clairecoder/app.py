@@ -33,6 +33,7 @@ from clairecoder.runtime.agent_runtime import AgentRuntime, RunResult
 from clairecoder.runtime.emitter import EventEmitter
 from clairecoder.runtime.bridge import EngineBridge
 from clairecoder.changeset.store import ChangeSetStore
+from clairecoder.session.store import SessionStore
 
 
 class ClaireCoderV1:
@@ -52,6 +53,7 @@ class ClaireCoderV1:
         verification_engine: Optional[VerificationEngine] = None,
         workspace_root: Optional[str] = None,
         changeset_store: Optional[ChangeSetStore] = None,
+        session_store: Optional[SessionStore] = None,
     ):
         from clairecoder.gateway.gateway import ModelGateway
         from clairecoder.tools.registry import ToolRegistry
@@ -102,6 +104,7 @@ class ClaireCoderV1:
             config_manager=self.config_manager,
             workspace_root=workspace_root,
             changeset_store=changeset_store,
+            session_store=session_store,
         )
 
     @classmethod
@@ -110,14 +113,25 @@ class ClaireCoderV1:
         model_gateway: Optional[ModelGatewayInterface] = None,
         workspace_root: Optional[str] = None,
         changeset_store: Optional[ChangeSetStore] = None,
+        session_store: Optional[SessionStore] = None,
     ) -> "ClaireCoderV1":
         """Factory method to construct a default ClaireCoderV1 application instance."""
-        return cls(model_gateway=model_gateway, workspace_root=workspace_root, changeset_store=changeset_store)
+        return cls(
+            model_gateway=model_gateway,
+            workspace_root=workspace_root,
+            changeset_store=changeset_store,
+            session_store=session_store,
+        )
 
     @property
     def changeset_store(self) -> ChangeSetStore:
         """Access the runtime ChangeSetStore."""
         return self.agent_runtime.changeset_store
+
+    @property
+    def session_store(self) -> SessionStore:
+        """Access the session store abstraction."""
+        return self.agent_runtime.session_store
         
     def get_active_model_id(self) -> Optional[str]:
         """Get the authoritative active model ID from configuration or registered gateway models."""
@@ -416,6 +430,12 @@ class ClaireCoderV1:
                 
     def resume_session(self, session_id: str) -> None:
         """Load session state from disk."""
+        if self.session_store.exists(session_id):
+            try:
+                self.session_store.get(session_id)
+            except Exception:
+                pass
+
         self.engineering_engine.resume_session(session_id)
         
         save_dir = Path(".clairecoder/sessions")

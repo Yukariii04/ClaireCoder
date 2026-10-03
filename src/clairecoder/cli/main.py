@@ -8,6 +8,8 @@ from typing import Any, List, Optional
 from clairecoder.app import ClaireCoderV1
 from clairecoder.gateway.types import ModelError
 from clairecoder.tui.app import TuiApplication
+from clairecoder.session.store import SessionStore
+from clairecoder.session.errors import SessionNotFoundError, SessionError
 
 
 def run_direct(
@@ -26,7 +28,7 @@ def run_direct(
     try:
         app.resume_session(sid)
         print(f"Resumed session: {sid}")
-    except (ValueError, FileNotFoundError):
+    except (ValueError, FileNotFoundError, SessionError, KeyError):
         app.create_session(sid)
 
     print(f"Executing objective: {objective}")
@@ -76,7 +78,7 @@ def run_interactive(
     sid = session_id or f"cli_{uuid.uuid4().hex[:8]}"
     try:
         app.resume_session(sid)
-    except (ValueError, FileNotFoundError):
+    except (ValueError, FileNotFoundError, SessionError, KeyError):
         app.create_session(sid)
 
     tui = TuiApplication(workspace_root=os.getcwd())
@@ -127,6 +129,15 @@ def run_cli(args: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--session", type=str, help="Optional session ID to resume or create"
     )
+    parser.add_argument(
+        "--resume", type=str, metavar="SESSION_ID", help="Resume an existing session by ID"
+    )
+    parser.add_argument(
+        "--list-sessions", action="store_true", help="List persisted sessions"
+    )
+    parser.add_argument(
+        "--inspect-session", type=str, metavar="SESSION_ID", help="Inspect a persisted session by ID"
+    )
 
     try:
         parsed_args = parser.parse_args(args)
@@ -138,7 +149,44 @@ def run_cli(args: Optional[List[str]] = None) -> int:
         print(f"ClaireCoder {app.get_version()}")
         return 0
 
+    if parsed_args.list_sessions:
+        store = SessionStore(workspace_root=os.getcwd())
+        sessions = store.list()
+        if not sessions:
+            print("No sessions found.")
+            return 0
+        print(f"{'SESSION ID':<20} {'STATUS':<12} {'UPDATED AT':<26} {'OBJECTIVE'}")
+        print("-" * 78)
+        for s in sessions:
+            obj_summary = (s.original_objective[:30] + "...") if len(s.original_objective) > 30 else s.original_objective
+            print(f"{s.session_id:<20} {s.status.value:<12} {s.updated_at:<26} {obj_summary}")
+        return 0
+
+    if parsed_args.inspect_session:
+        store = SessionStore(workspace_root=os.getcwd())
+        try:
+            sess = store.get(parsed_args.inspect_session)
+            print(f"Session ID:         {sess.session_id}")
+            print(f"Status:             {sess.status.value}")
+            print(f"Created At:         {sess.created_at}")
+            print(f"Updated At:         {sess.updated_at}")
+            print(f"Workspace Root:     {sess.workspace_root}")
+            print(f"Objective:          {sess.original_objective}")
+            print(f"Turn Count:         {sess.turn_count}")
+            print(f"Current Task:       {sess.current_task_id or 'None'}")
+            tasks_cnt = len(sess.task_graph_state.get('tasks', [])) if sess.task_graph_state else 0
+            print(f"Tasks Total:        {tasks_cnt}")
+            print(f"ChangeSets:         {len(sess.changesets)}")
+            return 0
+        except SessionNotFoundError:
+            print(f"Error: Session '{parsed_args.inspect_session}' not found.", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"Error inspecting session: {e}", file=sys.stderr)
+            return 1
+
+    target_session = parsed_args.resume or parsed_args.session
     if parsed_args.objective:
-        return run_direct(parsed_args.objective, session_id=parsed_args.session)
+        return run_direct(parsed_args.objective, session_id=target_session)
     else:
-        return run_interactive(session_id=parsed_args.session)
+        return run_interactive(session_id=target_session)

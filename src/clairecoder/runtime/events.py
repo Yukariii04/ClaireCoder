@@ -79,6 +79,14 @@ class EventType(str, Enum):
     ROLE_COMPLETED = "role.completed"
     ROLE_FAILED = "role.failed"
 
+    # --- Session lifecycle (Correction #21) ---
+    SESSION_CREATED = "session.created"
+    SESSION_RESUMED = "session.resumed"
+    SESSION_CHECKPOINTED = "session.checkpointed"
+    SESSION_COMPLETED = "session.completed"
+    SESSION_FAILED = "session.failed"
+    SESSION_INTERRUPTED = "session.interrupted"
+
     # --- Agent messages ---
     AGENT_MESSAGE = "agent.message"
     AGENT_ERROR = "agent.error"
@@ -102,7 +110,7 @@ class RuntimeEvent:
     """Central structured runtime event.
 
     Carries correlation IDs for event tracing across:
-      run → objective → task → tool_call → changeset
+      session → run → objective → task → tool_call → changeset
 
     The payload dict holds event-specific structured data.
     """
@@ -112,6 +120,7 @@ class RuntimeEvent:
     timestamp: datetime = field(default_factory=_utc_now)
 
     # --- Correlation IDs ---
+    session_id: Optional[str] = None
     run_id: Optional[str] = None
     objective_id: Optional[str] = None
     task_id: Optional[str] = None
@@ -133,6 +142,8 @@ class RuntimeEvent:
             "event_id": self.event_id,
             "timestamp": self.timestamp.isoformat(),
         }
+        if self.session_id is not None:
+            d["session_id"] = self.session_id
         if self.run_id is not None:
             d["run_id"] = self.run_id
         if self.objective_id is not None:
@@ -156,6 +167,7 @@ class RuntimeEvent:
             event_type=EventType(data["event_type"]),
             event_id=data.get("event_id", _new_event_id()),
             timestamp=datetime.fromisoformat(data["timestamp"]) if "timestamp" in data else _utc_now(),
+            session_id=data.get("session_id"),
             run_id=data.get("run_id"),
             objective_id=data.get("objective_id"),
             task_id=data.get("task_id"),

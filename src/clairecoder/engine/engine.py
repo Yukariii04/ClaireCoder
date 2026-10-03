@@ -64,7 +64,8 @@ class EngineeringSession:
         
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'EngineeringSession':
-        session = cls(data["id"])
+        sess_id = data.get("id") or data.get("session_id") or ""
+        session = cls(sess_id)
         
         obj_data = data.get("objective")
         if obj_data:

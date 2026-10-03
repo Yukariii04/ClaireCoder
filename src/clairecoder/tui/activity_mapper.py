@@ -147,8 +147,38 @@ class ActivityMapper:
             return None
 
         # Ignore internal lifecycle events that have no user-facing representation
-        if etype in (EventType.RUN_STARTED, EventType.RUN_COMPLETED, EventType.CHANGESET_CREATED):
+        if etype in (
+            EventType.RUN_STARTED,
+            EventType.RUN_COMPLETED,
+            EventType.CHANGESET_CREATED,
+            EventType.SESSION_CREATED,
+            EventType.SESSION_CHECKPOINTED,
+            EventType.SESSION_COMPLETED,
+            EventType.SESSION_FAILED,
+        ):
             return None
+
+        # ── Session Lifecycle (Correction #21 §10) ──
+        if etype == EventType.SESSION_RESUMED:
+            sid = payload.get("session_id") or "session"
+            return ActivityEvent(
+                status=ActivityStatus.COMPLETED,
+                operation=ActivityOperation.PLANNING,
+                target=f"session {sid}",
+                details=f"Resumed previous session {sid}",
+                correlation_key=f"session_resumed_{sid}",
+                metadata=payload,
+            )
+        elif etype == EventType.SESSION_INTERRUPTED:
+            sid = payload.get("session_id") or "session"
+            return ActivityEvent(
+                status=ActivityStatus.FAILED,
+                operation=ActivityOperation.PLANNING,
+                target=f"session {sid}",
+                details=f"Session {sid} interrupted",
+                correlation_key=f"session_interrupted_{sid}",
+                metadata=payload,
+            )
 
         corr_tool = f"rtool_{tool_call_id}" if tool_call_id else f"rtool_{payload.get('tool', 'tool')}_{task_id or run_id or '0'}"
 
