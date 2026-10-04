@@ -67,7 +67,10 @@ class ActivityRenderer:
 
         # Direct ActivityEvent rendering (Correction #20)
         if getattr(activity, "activity_event", None) is not None:
-            raw_lines = activity.activity_event.render_lines(width=width)
+            raw_lines = activity.activity_event.render_lines(
+                width=width,
+                include_diff=activity.expanded,
+            )
             wrapped: List[str] = []
             for ln in raw_lines:
                 if len(ln) > width and width > 10:
@@ -104,39 +107,66 @@ class ActivityRenderer:
             return wrapped
 
         # Standard agent activity
-        marker = "> ◌"
+        marker = "◌"
         if activity.state == ActivityState.COMPLETED:
             if activity.type in (ActivityType.EDITING, ActivityType.TEST, ActivityType.TOOL):
-                marker = "> ●"
+                marker = "●"
             else:
-                marker = "> ✓"
+                marker = "✓"
         elif activity.state == ActivityState.RUNNING:
-            marker = "> ●"
+            marker = "●"
         elif activity.state == ActivityState.FAILED:
-            marker = "> ✗"
+            marker = "✗"
         elif activity.state in (ActivityState.APPROVAL_REQUIRED, ActivityState.BLOCKED):
-            marker = "> ⚠"
+            marker = "⚠"
 
         # If title doesn't start with marker, prepend it
-        if not title_text.startswith(">"):
+        if not title_text.startswith((">", "●", "✓", "✗", "◌", "⚠")):
             header_line = f"{marker} {title_text}"
         else:
             header_line = title_text
 
         lines = [header_line]
 
-        # Expandable content (e.g. inline diff)
+        # Expandable content (e.g. tool output) stays out of the feed until asked for.
         if activity.expanded and activity.expandable_content:
             for exp_line in activity.expandable_content.splitlines():
                 lines.append(f"  {exp_line}")
         elif activity.detail:
-            for detail_line in activity.detail.splitlines():
-                lines.append(f"  {detail_line}")
+            detail_lines = activity.detail.splitlines()
+            detail_chars = sum(len(line) for line in detail_lines)
+            if not activity.expanded and (len(detail_lines) > 4 or detail_chars > 320):
+                preview = detail_lines[:2]
+                if len(preview) == 1 and len(preview[0]) > 240:
+                    preview[0] = preview[0][:237] + "..."
+                for detail_line in preview:
+                    lines.append(f"  {detail_line}")
+                hidden_lines = max(0, len(detail_lines) - len(preview))
+                suffix = f"{hidden_lines} more lines" if hidden_lines else "more output"
+                lines.append(f"  … {suffix} · Ctrl+O to expand")
+            else:
+                for detail_line in detail_lines:
+                    lines.append(f"  {detail_line}")
+
+        if not activity.expanded and activity.expandable_content:
+            if not activity.detail:
+                lines.append("  Output hidden · Ctrl+O to expand")
+            elif len(activity.detail.splitlines()) <= 4 and len(activity.detail) <= 320:
+                lines.append("  More output · Ctrl+O to expand")
 
         if activity.expanded and activity.diff_info:
-            for d_line in activity.diff_info.lines:
+            inner_w = max(30, width - 6)
+            lines.append(f"  ┌{'─' * inner_w}┐")
+            for d_line in activity.diff_info.lines[:12]:
                 prefix = "+" if d_line.type == "add" else ("-" if d_line.type == "remove" else " ")
-                lines.append(f"  {prefix} {d_line.content}")
+                content = f"{prefix} {d_line.content}"
+                if len(content) > inner_w:
+                    content = content[:inner_w - 1] + "…"
+                pad = max(0, inner_w - len(content))
+                lines.append(f"  │{content}{' ' * pad}│")
+            lines.append(f"  └{'─' * inner_w}┘")
+            if len(activity.diff_info.lines) > 12:
+                lines.append("  …")
 
         # Wrap any line that exceeds terminal width
         wrapped: List[str] = []
@@ -155,11 +185,7 @@ class ActivityRenderer:
 
         msg_lines = activity.detail.splitlines() if activity.detail else []
         if not msg_lines:
-            msg_lines = [
-                "Streaming decode support added with a safe fallback.",
-                "All tests are passing.",
-                "What would you like to work on next?"
-            ]
+            return lines  # No content — don't fabricate placeholder text
 
         for line in msg_lines:
             raw = f"  {line}"

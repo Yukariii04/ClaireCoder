@@ -226,6 +226,7 @@ class InputDecoder:
         "\x14": "ctrl+t",
         "\x12": "ctrl+r",
         "\x10": "ctrl+p",
+        "\x0f": "ctrl+o",
         "\x16": "ctrl+v",
     }
 
@@ -237,7 +238,7 @@ class InputDecoder:
         "home", "end", "insert", "delete",
         "enter", "return", "backspace", "tab",
         "escape", "esc",
-        "ctrl+c", "ctrl+t", "ctrl+r", "ctrl+p", "ctrl+v",
+        "ctrl+c", "ctrl+t", "ctrl+r", "ctrl+p", "ctrl+o", "ctrl+v",
         "shift+insert", "shift_insert", "paste",
     }
 

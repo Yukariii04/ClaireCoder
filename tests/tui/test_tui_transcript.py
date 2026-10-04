@@ -23,22 +23,18 @@ def test_activity_status_transitions():
     act = ActivityModel(title="pytest", type=ActivityType.TOOL, state=ActivityState.RUNNING)
     lines = ActivityRenderer.render(act)
     assert "◌" in lines[0] or "●" in lines[0]
-    assert lines[0].startswith(">")
     
     act.state = ActivityState.COMPLETED
     lines = ActivityRenderer.render(act)
     assert "✓" in lines[0] or "●" in lines[0]
-    assert lines[0].startswith(">")
     
     act.state = ActivityState.FAILED
     lines = ActivityRenderer.render(act)
     assert "✗" in lines[0]
-    assert lines[0].startswith(">")
     
     act.state = ActivityState.APPROVAL_REQUIRED
     lines = ActivityRenderer.render(act)
     assert "⚠" in lines[0]
-    assert lines[0].startswith(">")
 
 
 def test_transcript_append_and_update():
@@ -75,7 +71,8 @@ def test_expansion_and_long_output():
         expandable_content="Line 1\nLine 2\nLine 3"
     )
     lines = ActivityRenderer.render(act)
-    assert len(lines) == 1
+    # Title + hidden output hint
+    assert "Output hidden" in "\n".join(lines)
     assert "Line 1" not in "\n".join(lines)
     
     act.expanded = True
@@ -100,9 +97,13 @@ def test_diff_rendering():
     
     act.expanded = True
     lines = ActivityRenderer.render(act)
-    assert len(lines) == 3
-    assert lines[1] == "  - print('hello')"
-    assert lines[2] == "  + print('world')"
+    # Title + box_top + 2 diff lines + box_bot = 5 lines (bordered diff)
+    assert len(lines) == 5
+    rendered = "\n".join(lines)
+    assert "┌" in rendered
+    assert "└" in rendered
+    assert "print('hello')" in rendered
+    assert "print('world')" in rendered
 
 
 def test_event_ordering():
@@ -122,7 +123,7 @@ def test_terminal_resize_behavior():
         view.append_activity(ActivityModel(title=f"Line {i}"))
         
     view.resize(5)
-    assert view.scroll_position == 5  # 10 lines total - 5 visible
+    assert view.scroll_position == 5
 
 
 def test_transcript_hard_clipping_and_frame_height_invariance():

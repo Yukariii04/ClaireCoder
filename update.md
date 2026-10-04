@@ -1644,3 +1644,45 @@
 - **Verification**: Not run; this correction has not been validated by executing tests.
 - **Artifact**: `Phase_CLI_TUI_Stage_7_Correction_24_1.zip`.
 - **Next Step**: User review.
+
+### 2026-10-04 — CLI / TUI Stage 7: Correction #25 (TUI Panels & Activity Clarity)
+- **Status**: IMPLEMENTED; tests not run.
+- **Diagnosis**:
+  - The outer TUI frame prefixed already-framed overlays with another character, clipping their right border. Long commands and reasons could also exceed the permission card width.
+  - Review did not load session changesets, and task state was only synced when the panel opened, leaving progress stale while the runtime worked.
+  - Long file diffs and command output crowded the transcript.
+- **Changes**:
+  - Bounded permission, review, and task panels by the available terminal width and height; wrapped permission text and shortened oversized cards while preserving borders.
+  - Populated review from injected session and changeset stores, added file selection and diff scrolling, and refreshed task state on live task and session checkpoint events.
+  - Removed the extra overlay inset, split session details across the status rows, collapsed lengthy activity details by default, and added Ctrl+O to expand the newest activity.
+- **Files Modified**:
+  - `src/clairecoder/cli/main.py`
+  - `src/clairecoder/tui/activity.py`, `src/clairecoder/tui/app.py`, `src/clairecoder/tui/permission.py`, `src/clairecoder/tui/renderer.py`, `src/clairecoder/tui/review.py`, `src/clairecoder/tui/task.py`, `src/clairecoder/tui/terminal.py`, `src/clairecoder/tui/transcript.py`
+  - `docs/UX/TUI-DESIGN.md`, `memory.md`, `update.md`
+- **Verification**: Not run; the user asked for the fix, not test execution.
+- **Artifact**: `Phase_CLI_TUI_Stage_7_Correction_25.zip`.
+- **Next Step**: User review.
+
+### 2026-10-04 — CLI / TUI Stage 7: Correction #25.1 (Reference Design Fidelity & Context Usage Display)
+- **Status**: COMPLETED & VERIFIED (256/256 TUI tests passing).
+- **Diagnosis**:
+  - Main TUI activities were prefixed with `>` prompts, creating visual clutter and departing from the reference design (`ClaireCoder-TUI-Design-V1-MAIN-TUI.png`).
+  - Context usage in the status header remained static at `-` because token consumption was not accumulated from streaming response objects into the interaction controller.
+  - Review and task overlay syncing prematurely reset preview structures when running without an active session store or controller.
+  - Inter-activity blank line spacing was applied unconditionally, causing compact tool events to expand and scroll older activities off-screen.
+- **Changes**:
+  - Removed `>` prompt prefix from activity stream markers, matching the clean `✓ Reading`, `✓ Editing`, `✓ pytest` design tokens.
+  - Accumulated prompt and completion tokens from both streaming and non-streaming model execution into `InteractionController._total_prompt_tokens` / `_total_completion_tokens`.
+  - Added smart inter-activity spacing that inserts breathing room after multi-line cards (diffs, test outputs, assistant messages) without padding consecutive single-line activities.
+  - Safeguarded `_sync_task_view_from_session` and `_sync_review_from_session` to avoid resetting overlay instances when controller or session stores are absent.
+  - Restored proper verb forms (`Editing`, `Creating`) in `ActivityEvent.render_lines()` to maintain consistency with existing tests and reference mockups.
+  - Updated visual fidelity and scroll tests to validate the clean marker presentation and exact 22-line layout composition.
+- **Files Modified**:
+  - `src/clairecoder/interaction/controller.py`
+  - `src/clairecoder/tui/activity.py`, `src/clairecoder/tui/app.py`, `src/clairecoder/tui/preview.py`, `src/clairecoder/tui/transcript.py`
+  - `tests/tui/test_activity_stream.py`, `tests/tui/test_terminal_experience_finalization.py`, `tests/tui/test_tui_foundation.py`, `tests/tui/test_tui_transcript.py`, `tests/tui/test_visual_fidelity.py`
+  - `memory.md`, `update.md`
+- **Verification**: All 256 tests in `tests/tui/` passing.
+- **Artifact**: `Phase_CLI_TUI_Stage_7_Correction_25_1.zip`.
+- **Next Step**: User review.
+

@@ -1,6 +1,6 @@
 """Transcript and scrollback presentation layer."""
 from typing import List, Dict, Optional
-from .activity import ActivityModel, ActivityState
+from .activity import ActivityModel, ActivityState, ActivityType
 from .renderer import ActivityRenderer
 
 class TranscriptView:
@@ -99,11 +99,39 @@ class TranscriptView:
                 self.scroll_to_bottom()
             else:
                 self.scroll_position = min(self.scroll_position, self._max_scroll())
+
+    def toggle_latest_details(self) -> bool:
+        """Expand or collapse the newest activity with hidden details."""
+        target = next((activity for activity in reversed(self.activities) if (
+            activity.expandable_content
+            or (activity.diff_info and activity.diff_info.lines)
+            or (activity.activity_event and activity.activity_event.diff_info and activity.activity_event.diff_info.lines)
+            or (activity.detail and (
+                len(activity.detail.splitlines()) > 4 or len(activity.detail) > 320
+            ))
+        )), None)
+        if target is None:
+            return False
+
+        expand = not target.expanded
+        for activity in self.activities:
+            activity.expanded = activity is target and expand
+        if self._follow_tail:
+            self.scroll_to_bottom()
+        else:
+            self.scroll_position = min(self.scroll_position, self._max_scroll())
+        return True
             
     def _get_rendered_lines(self) -> List[str]:
-        lines = []
-        for act in self.activities:
-            lines.extend(ActivityRenderer.render(act, width=self.render_width))
+        lines: List[str] = []
+        for idx, act in enumerate(self.activities):
+            rendered_act = ActivityRenderer.render(act, width=self.render_width)
+            if idx > 0:
+                prev_act = self.activities[idx - 1]
+                prev_rendered = ActivityRenderer.render(prev_act, width=self.render_width)
+                if len(prev_rendered) > 1:
+                    lines.append("")
+            lines.extend(rendered_act)
         return lines
         
     def get_visible_lines(self, padded: bool = False) -> List[str]:

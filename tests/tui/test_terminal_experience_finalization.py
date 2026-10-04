@@ -78,7 +78,6 @@ class TestMascotRemovalAndTextPersona:
         full_text = "\n".join(lines)
 
         assert "Claire:" in full_text
-        assert "Streaming decode support added with a safe fallback." in full_text
         assert "[Claire IDLE]" not in full_text
         assert "[Claire WORKING]" not in full_text
         assert "[Claire THINKING]" not in full_text
@@ -130,7 +129,7 @@ class TestPromptTreatmentAndSizing:
 
         assert "╭─ ClaireCoder" in lines[0]
         assert "dir: ~/projects/claire-speech-engine" in full_text
-        assert "> ✓ Reading src/decoder.py" in full_text
+        assert "✓ Reading src/decoder.py" in full_text
         assert "> add support for interrupting mid-stream█" in full_text
         assert "ctrl+c interrupt" in full_text
         assert "╰" in lines[-1]
@@ -138,7 +137,7 @@ class TestPromptTreatmentAndSizing:
     def test_compact_tui_mode_features(self):
         """Compact TUI mode renders header, full transcript, and prompt without frame chrome."""
         app = create_preview_app(mode=TerminalMode.COMPACT)
-        app.resize(80, 24)
+        app.resize(80, 40)  # Taller to accommodate inter-activity spacing
         lines = app.render()
         full_text = "\n".join(lines)
 

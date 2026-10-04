@@ -3,10 +3,11 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Callable
 import re
+import textwrap
 
 from .states import TerminalMode
 from .activity import DiffInfo, DiffLine
-from .canvas import visible_length
+from .canvas import visible_length, visible_slice
 
 class PermissionDecision(str, Enum):
     APPROVE = "approve"
@@ -203,7 +204,12 @@ class PermissionSurface:
 
         return None
 
-    def render(self, mode: TerminalMode = TerminalMode.FULL, width: int = 80) -> List[str]:
+    def render(
+        self,
+        mode: TerminalMode = TerminalMode.FULL,
+        width: int = 80,
+        height: Optional[int] = None,
+    ) -> List[str]:
         """Renders the confirmation surface based on terminal mode."""
         if not self.active_request:
             return []
@@ -212,11 +218,36 @@ class PermissionSurface:
         cmd_str = req.formatted_command
 
         if mode == TerminalMode.MINIMAL:
-            return self._render_minimal(req, cmd_str)
+            lines = self._render_minimal(req, cmd_str)
         elif mode == TerminalMode.COMPACT:
-            return self._render_compact(req, cmd_str, width)
+            lines = self._render_compact(req, cmd_str, width)
         else:
-            return self._render_full(req, cmd_str, width)
+            lines = self._render_full(req, cmd_str, width)
+        return self._fit_height(lines, height)
+
+    @staticmethod
+    def _fit_height(lines: List[str], height: Optional[int]) -> List[str]:
+        """Preserve the card's top and bottom borders when details exceed the viewport."""
+        if height is None or len(lines) <= height or height <= 0:
+            return lines
+        if height == 1:
+            return ["… permission details"]
+        if len(lines) < 2 or height == 2:
+            if lines and lines[0].startswith("╭") and lines[-1].startswith("╰"):
+                return [lines[0], lines[-1]]
+            return lines[:height]
+
+        top = lines[0]
+        bottom = lines[-1]
+        if not top.startswith("╭") or not bottom.startswith("╰"):
+            message = "… permission details shortened"
+            return [*lines[: max(0, height - 1)], message]
+        card_width = visible_length(top)
+        inner_width = max(0, card_width - 4)
+        message = visible_slice("… details shortened to fit terminal", 0, inner_width)
+        message_line = f"│ {message}{' ' * max(0, inner_width - visible_length(message))} │"
+        content_slots = max(0, height - 3)
+        return [top, *lines[1 : 1 + content_slots], message_line, bottom][:height]
 
     def _render_minimal(self, req: PermissionRequestViewModel, cmd_str: str) -> List[str]:
         lines = [
@@ -234,23 +265,34 @@ class PermissionSurface:
         return lines
 
     def _render_compact(self, req: PermissionRequestViewModel, cmd_str: str, width: int) -> List[str]:
-        card_w = max(50, min(width - 2, 70))
+        if width < 26:
+            return self._render_minimal(req, cmd_str)
+        card_w = min(width - 2, 70)
+        inner_w = card_w - 4
 
         def box_line(content: str = "") -> str:
             vis = visible_length(content)
-            pad = max(0, card_w - 4 - vis)
+            if vis > inner_w:
+                content = visible_slice(content, 0, inner_w)
+                vis = visible_length(content)
+            pad = max(0, inner_w - vis)
             return f"│ {content}{' ' * pad} │"
 
         header_title = " Permission Required "
-        pad_top = max(0, card_w - len(f"╭─{header_title}") - 1)
-        top_border = f"╭─{header_title}" + ("─" * pad_top) + "╮"
+        top_inner = visible_slice(f"─{header_title.strip()} ", 0, card_w - 2)
+        top_border = f"╭{top_inner}{'─' * max(0, card_w - 2 - visible_length(top_inner))}╮"
         bot_border = "╰" + ("─" * (card_w - 2)) + "╯"
 
-        lines = [
-            top_border,
-            box_line(f"ClaireCoder wants to run: $ {cmd_str}"),
-            box_line("[y] yes  [n] no  [a] always  [d] diff  (Esc cancel)"),
-        ]
+        lines = [top_border, box_line("ClaireCoder wants to run:")]
+        command_rows = textwrap.wrap(
+            f"  $ {cmd_str}",
+            width=max(1, inner_w),
+            subsequent_indent="    ",
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or ["  $"]
+        lines.extend(box_line(row) for row in command_rows)
+        lines.append(box_line("[y] yes  [n] no  [a] always  [d] diff  (Esc cancel)"))
 
         if self.diff_expanded:
             if self.diff_message:
@@ -265,24 +307,38 @@ class PermissionSurface:
         return lines
 
     def _render_full(self, req: PermissionRequestViewModel, cmd_str: str, width: int) -> List[str]:
-        card_w = 56
+        if width < 58:
+            return self._render_compact(req, cmd_str, width)
+        card_w = min(56, width - 2)
+        inner_w = card_w - 4
 
         def box_line(content: str = "") -> str:
             vis = visible_length(content)
-            pad = max(0, card_w - 4 - vis)
+            if vis > inner_w:
+                content = visible_slice(content, 0, inner_w)
+                vis = visible_length(content)
+            pad = max(0, inner_w - vis)
             return f"│ {content}{' ' * pad} │"
 
         header_title = " Permission Required "
-        pad_top = max(0, card_w - len(f"╭─{header_title}") - 1)
-        top_border = f"╭─{header_title}" + ("─" * pad_top) + "╮"
+        top_inner = visible_slice(f"─{header_title.strip()} ", 0, card_w - 2)
+        top_border = f"╭{top_inner}{'─' * max(0, card_w - 2 - visible_length(top_inner))}╮"
         bot_border = "╰" + ("─" * (card_w - 2)) + "╯"
 
         lines = [
             top_border,
             box_line(""),
             box_line("ClaireCoder wants to run:"),
-            box_line(""),
-            box_line(f"  $ {cmd_str}"),
+        ]
+        command_rows = textwrap.wrap(
+            f"  $ {cmd_str}",
+            width=max(1, inner_w),
+            subsequent_indent="    ",
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or ["  $"]
+        lines.extend(box_line(row) for row in command_rows)
+        lines.extend([
             box_line(""),
             box_line("╭─────────╮   ╭─────────╮"),
             box_line("│ [y] yes │   │ [n] no  │"),
@@ -292,11 +348,18 @@ class PermissionSurface:
             box_line("╰───────────────────────────╯   ╰──────────╯"),
             box_line(""),
             box_line("Claire:"),
-        ]
+        ])
 
         if req.reason:
             for r_line in req.reason.splitlines():
-                lines.append(box_line(f"  {r_line}"))
+                wrapped_reason = textwrap.wrap(
+                    f"  {r_line}",
+                    width=max(1, inner_w),
+                    subsequent_indent="    ",
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                ) or ["  "]
+                lines.extend(box_line(row) for row in wrapped_reason)
             lines.append(box_line("  Are you sure?"))
         else:
             lines.append(box_line("  Are you sure you want to proceed with this"))
@@ -307,7 +370,7 @@ class PermissionSurface:
 
         if self.diff_expanded:
             lines.append(box_line(""))
-            lines.append(box_line("─" * (card_w - 4)))
+            lines.append(box_line("─" * inner_w))
             if self.diff_message:
                 lines.append(box_line(f"  {self.diff_message}"))
             elif req.diff_info:

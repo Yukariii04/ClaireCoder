@@ -430,6 +430,11 @@ class InteractionController:
                         collected.append(c_text)
                         self._emit_event("streaming_chunk", {"session_id": session_id, "text": c_text})
                 final_text = "".join(collected)
+                # Accumulate token usage from streaming response (often populated after stream completes)
+                usage = getattr(resp, "usage", None)
+                if usage and isinstance(usage, dict):
+                    self._total_prompt_tokens += usage.get("prompt_tokens", 0)
+                    self._total_completion_tokens += usage.get("completion_tokens", 0)
                 # Filter out raw tool-call JSON from response
                 final_text = self._filter_tool_call_json(final_text)
                 self._emit_event("response_complete", {"session_id": session_id, "text": final_text})
@@ -553,6 +558,11 @@ class InteractionController:
                             collected.append(c_text)
                             self._emit_event("streaming_chunk", {"session_id": session_id, "text": c_text})
                     final_text = "".join(collected)
+                    # Accumulate token usage from streaming response
+                    usage = getattr(resp, "usage", None)
+                    if usage and isinstance(usage, dict):
+                        self._total_prompt_tokens += usage.get("prompt_tokens", 0)
+                        self._total_completion_tokens += usage.get("completion_tokens", 0)
                     final_text = self._filter_tool_call_json(final_text)
                     self._emit_event("response_complete", {"session_id": session_id, "text": final_text})
                     if run and not run.is_terminal:

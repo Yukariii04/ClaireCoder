@@ -24,6 +24,8 @@ from .terminal import TerminalCapability, TerminalRenderer, TerminalInput, Input
 from .wizard import SetupWizard, WizardStage
 from .model_selector import ModelSelectorOverlay, ModelSelectorStage
 
+_SYNC_SECONDARY_VIEWS = object()
+
 class TuiApplication:
     """Central TUI Application coordinating state, layout, key dispatch, and visual surfaces."""
 
@@ -47,6 +49,9 @@ class TuiApplication:
         self._runtime_tui_listener = None
         self._runtime_event_callback = None
         self._runtime_unsubscribe = None
+        self._session_store = None
+        self._changeset_store = None
+        self._runtime_task_states: Dict[str, Dict[str, tuple[str, str]]] = {}
         self.on_interrupt: Optional[Callable[[], None]] = None
         self.on_permission_response: Optional[Callable[..., None]] = None
         
@@ -645,7 +650,16 @@ class TuiApplication:
         while not self._event_queue.empty():
             try:
                 event = self._event_queue.get_nowait()
-                self.handle_event(event)
+                if isinstance(event, tuple) and event and event[0] is _SYNC_SECONDARY_VIEWS:
+                    self._sync_task_view_from_session()
+                    self._sync_review_from_session()
+                    if len(event) > 1:
+                        self._apply_runtime_task_event(event[1])
+                elif event is _SYNC_SECONDARY_VIEWS:
+                    self._sync_task_view_from_session()
+                    self._sync_review_from_session()
+                else:
+                    self.handle_event(event)
                 processed = True
             except queue.Empty:
                 break
@@ -837,7 +851,7 @@ class TuiApplication:
             return
 
         named_keys = (
-            "ctrl+c", "ctrl+r", "ctrl+t", "ctrl+p",
+            "ctrl+c", "ctrl+r", "ctrl+t", "ctrl+p", "ctrl+o",
             "escape", "esc", "enter", "backspace", "tab",
             "up", "down", "left", "right",
             "pageup", "pagedown", "home", "end", "delete", "insert",
@@ -860,10 +874,13 @@ class TuiApplication:
         elif hasattr(controller, "subscribe_events"):
             controller.subscribe_events(self._on_engine_event)
 
-    def connect_runtime(self, event_emitter) -> None:
+    def connect_runtime(self, event_emitter, session_store=None, changeset_store=None) -> None:
         """Connect semantic runtime activity events to the visible transcript."""
         from clairecoder.runtime.events import EventType
         from clairecoder.runtime.tui_listener import RuntimeEventTuiListener
+
+        self._session_store = session_store
+        self._changeset_store = changeset_store
 
         visible_types = {
             EventType.TOOL_STARTED,
@@ -887,8 +904,22 @@ class TuiApplication:
             EventType.CHANGESET_COMPLETED,
         }
         listener = RuntimeEventTuiListener()
+        refresh_types = {
+            EventType.TASK_STARTED,
+            EventType.TASK_COMPLETED,
+            EventType.TASK_FAILED,
+            EventType.SESSION_CHECKPOINTED,
+            EventType.CHANGESET_COMPLETED,
+        }
 
         def _on_runtime_event(event):
+            if event.event_type in refresh_types:
+                if self._in_run_loop:
+                    self._event_queue.put((_SYNC_SECONDARY_VIEWS, event))
+                else:
+                    self._sync_task_view_from_session()
+                    self._sync_review_from_session()
+                    self._apply_runtime_task_event(event)
             if event.event_type not in visible_types:
                 return
             activity = listener.event_to_activity(event)
@@ -964,6 +995,7 @@ class TuiApplication:
 
     def open_review(self) -> None:
         """Opens the review changes overlay."""
+        self._sync_review_from_session()
         self.active_overlay = "review"
         self.set_state(InputState.OVERLAY)
 
@@ -995,74 +1027,186 @@ class TuiApplication:
             PAUSED / CANCELLED → Status: Interrupted / Cancelled
         """
         from .task import WorkflowTaskItem
-        if not self.controller or not hasattr(self.controller, "_engine") or not self.controller._engine:
-            return
+        from clairecoder.session.errors import SessionError
 
         sid = self.header.session_id
-        session = self.controller._engine.get_session(sid) if sid else None
-        if not session or not session.objective:
-            self.task_view.reset()
+        if not sid or not self.controller:
             return
 
-        from clairecoder.engine.types import ObjectiveStatus
-        obj_status = session.objective.status
+        engine = getattr(self.controller, "_engine", None)
+        engine_session = engine.get_session(sid) if engine and hasattr(engine, "get_session") else None
+        runtime_session = None
+        session_store = self._session_store
+        if session_store is not None:
+            try:
+                runtime_session = session_store.get(sid)
+            except SessionError:
+                runtime_session = None
 
-        # Set objective text regardless of status (so completed/failed views show it)
-        self.task_view.objective = session.objective.request
+        objective = getattr(engine_session, "objective", None)
+        objective_text = getattr(objective, "request", "") if objective else ""
+        if not objective_text and runtime_session:
+            objective_text = getattr(runtime_session, "original_objective", "")
+        self.task_view.objective = objective_text or ""
 
-        # Map terminal objective states to task view status
-        if obj_status == ObjectiveStatus.COMPLETED:
-            self.task_view.status = "Complete"
+        status_value = getattr(getattr(objective, "status", None), "value", None)
+        if status_value is None and runtime_session and objective_text:
+            status_value = getattr(getattr(runtime_session, "status", None), "value", None)
+        status_value = str(status_value or "idle").lower()
+        status_display = {
+            "active": "Active",
+            "completed": "Complete",
+            "complete": "Complete",
+            "succeeded": "Complete",
+            "failed": "Failed",
+            "cancelled": "Cancelled",
+            "paused": "Interrupted",
+            "interrupted": "Interrupted",
+        }
+        self.task_view.status = status_display.get(status_value, "Idle")
+        self.task_view.failure_reason = (
+            getattr(objective, "failure_reason", None)
+            or getattr(runtime_session, "failure_reason", None)
+            if self.task_view.status == "Failed"
+            else None
+        )
+        if self.task_view.status == "Complete":
             self.task_view.progress_pct = 100
-            self.task_view.failure_reason = None
-            # Clear active execution flag
             self.header.task_progress = "Complete"
-        elif obj_status == ObjectiveStatus.FAILED:
-            self.task_view.status = "Failed"
-            self.task_view.failure_reason = getattr(session.objective, 'failure_reason', None) or "Execution failed"
+        elif self.task_view.status == "Failed":
+            self.task_view.failure_reason = self.task_view.failure_reason or "Execution failed"
             self.header.task_progress = "Failed"
-        elif obj_status == ObjectiveStatus.CANCELLED:
-            self.task_view.status = "Cancelled"
-            self.task_view.failure_reason = None
+        elif self.task_view.status == "Cancelled":
             self.header.task_progress = "Cancelled"
-        elif obj_status == ObjectiveStatus.PAUSED:
-            self.task_view.status = "Interrupted"
-            self.task_view.failure_reason = None
+        elif self.task_view.status == "Interrupted":
             self.header.task_progress = "Paused"
-        elif obj_status == ObjectiveStatus.ACTIVE:
-            self.task_view.status = "Active"
-            self.task_view.failure_reason = None
-        else:
-            self.task_view.reset()
+
+        tasks_list = []
+        engine_tasks = getattr(engine_session, "tasks", {}) if engine_session else {}
+        live_tasks = self._runtime_task_states.get(sid, {})
+        if isinstance(engine_tasks, dict):
+            for idx, (task_id, task) in enumerate(engine_tasks.items(), start=1):
+                state = getattr(getattr(task, "status", None), "value", getattr(task, "status", "pending"))
+                title = getattr(task, "title", "") or getattr(task, "description", "") or "Task"
+                if task_id in live_tasks:
+                    state, live_title = live_tasks[task_id]
+                    title = live_title or title
+                state = str(state).lower()
+                marker = self._task_marker(state)
+                tasks_list.append(WorkflowTaskItem(number=idx, title=title, marker=marker))
+
+        if not tasks_list and runtime_session:
+            graph_state = getattr(runtime_session, "task_graph_state", None) or {}
+            graph_tasks = graph_state.get("tasks", []) if isinstance(graph_state, dict) else []
+            for idx, task_data in enumerate(graph_tasks, start=1):
+                if not isinstance(task_data, dict):
+                    continue
+                state = str(task_data.get("status", "pending")).lower()
+                title = task_data.get("title") or task_data.get("description") or task_data.get("id") or "Task"
+                task_id = str(task_data.get("id", ""))
+                if task_id in live_tasks:
+                    state, live_title = live_tasks[task_id]
+                    title = live_title or title
+                tasks_list.append(WorkflowTaskItem(number=idx, title=str(title), marker=self._task_marker(state)))
+
+        if not tasks_list and live_tasks:
+            for idx, (_, (state, title)) in enumerate(live_tasks.items(), start=1):
+                tasks_list.append(WorkflowTaskItem(number=idx, title=title or "Task", marker=self._task_marker(state)))
+
+        if not tasks_list and objective_text:
+            tasks_list = [WorkflowTaskItem(
+                number=1,
+                title="Working on objective",
+                marker="▶" if self.task_view.status == "Active" else "○",
+            )]
+
+        self.task_view.tasks = tasks_list
+        if tasks_list:
+            succeeded_count = sum(1 for task in tasks_list if task.marker == "✓")
+            self.task_view.progress_pct = (
+                100 if self.task_view.status == "Complete"
+                else int(100 * succeeded_count / len(tasks_list))
+            )
+            if self.task_view.status == "Active":
+                self.header.task_progress = f"{succeeded_count}/{len(tasks_list)}"
+        elif self.task_view.status != "Complete":
+            self.task_view.progress_pct = 0
+
+    @staticmethod
+    def _task_marker(status: str) -> str:
+        """Map authoritative task state to the compact workflow glyph."""
+        if status in ("succeeded", "completed", "complete"):
+            return "✓"
+        if status in ("running", "executed", "verifying"):
+            return "▶"
+        if status == "failed":
+            return "✗"
+        if status in ("cancelled", "blocked"):
+            return "⊘"
+        return "○"
+
+    def _apply_runtime_task_event(self, event) -> None:
+        """Apply live task lifecycle events while the persisted graph catches up."""
+        from clairecoder.runtime.events import EventType
+
+        status_for_event = {
+            EventType.TASK_STARTED: "running",
+            EventType.TASK_COMPLETED: "completed",
+            EventType.TASK_FAILED: "failed",
+        }
+        task_status = status_for_event.get(getattr(event, "event_type", None))
+        task_id = getattr(event, "task_id", None)
+        session_id = getattr(event, "session_id", None) or self.header.session_id
+        if not task_status or not task_id or not session_id:
+            return
+        payload = getattr(event, "payload", {}) or {}
+        title = payload.get("title") or payload.get("description") or task_id
+        self._runtime_task_states.setdefault(session_id, {})[str(task_id)] = (task_status, str(title))
+        self._sync_task_view_from_session()
+
+    def _sync_review_from_session(self) -> None:
+        """Load this session's recorded changesets into the review overlay."""
+        from clairecoder.session.errors import SessionError
+        from .activity import DiffLine
+        from .diff import FileDiff
+
+        sid = self.header.session_id
+        session_store = self._session_store
+        changeset_store = self._changeset_store
+        if not sid or session_store is None or changeset_store is None:
+            return
+        try:
+            session = session_store.get(sid)
+        except SessionError:
+            self.review_overlay.update_files([])
             return
 
-        # Build task list from session tasks
-        tasks_list = []
-        if hasattr(session, "tasks") and session.tasks:
-            for idx, (tid, t) in enumerate(session.tasks.items(), start=1):
-                st_val = getattr(t.status, "value", str(t.status))
-                if st_val == "succeeded":
-                    marker = "✓"
-                elif st_val == "running":
-                    marker = "▶"
-                elif st_val == "failed":
-                    marker = "✗"
-                elif st_val == "cancelled":
-                    marker = "⊘"
-                else:
-                    marker = "○"
-                tasks_list.append(WorkflowTaskItem(number=idx, title=t.description, marker=marker))
-
-            self.task_view.tasks = tasks_list
-            if obj_status == ObjectiveStatus.ACTIVE:
-                succeeded_cnt = sum(1 for t in session.tasks.values() if getattr(t.status, "value", "") == "succeeded")
-                total_cnt = max(1, len(session.tasks))
-                self.task_view.progress_pct = int(100 * succeeded_cnt / total_cnt)
-                self.header.task_progress = f"{succeeded_cnt}/{len(session.tasks)}"
-        else:
-            self.task_view.tasks = []
-            if obj_status == ObjectiveStatus.ACTIVE:
-                self.task_view.progress_pct = 0
+        files_by_path = {}
+        for reference in getattr(session, "changesets", []):
+            changeset = changeset_store.get_changeset(reference.changeset_id)
+            if not changeset:
+                continue
+            for changed_file in changeset.files:
+                diff_lines = []
+                for raw_line in str(changed_file.diff or "").splitlines():
+                    if raw_line.startswith(("diff ", "index ", "---", "+++", "@@", "\\")):
+                        continue
+                    if raw_line.startswith("+"):
+                        diff_lines.append(DiffLine("add", raw_line[1:]))
+                    elif raw_line.startswith("-"):
+                        diff_lines.append(DiffLine("remove", raw_line[1:]))
+                    elif raw_line.startswith(" "):
+                        diff_lines.append(DiffLine("context", raw_line[1:]))
+                operation = getattr(changed_file.operation, "value", changed_file.operation)
+                files_by_path[changed_file.path] = FileDiff(
+                    file_path=changed_file.path,
+                    additions=changed_file.additions,
+                    deletions=changed_file.deletions,
+                    is_new=(operation == "created"),
+                    is_deleted=(operation == "deleted"),
+                    lines=diff_lines,
+                )
+        self.review_overlay.update_files(list(files_by_path.values()))
 
     def close_overlay(self) -> None:
         """Closes any active overlay and restores normal input."""
@@ -1225,9 +1369,6 @@ class TuiApplication:
                     return True
                 return True
             elif self.active_overlay == "review":
-                if clean_key in ("\x1b", "escape", "esc", "q", "back"):
-                    self.close_overlay()
-                    return True
                 self.review_overlay.handle_key(clean_key)
                 return True
             elif self.active_overlay == "palette":
@@ -1307,7 +1448,9 @@ class TuiApplication:
                     return True
 
         # 6. Transcript Scrolling Shortcuts (Main Pane)
-        if clean_key in ("pageup", "page_up", "pgup"):
+        if clean_key == "ctrl+o":
+            return self.transcript.toggle_latest_details()
+        elif clean_key in ("pageup", "page_up", "pgup"):
             self.transcript.page_up()
             return True
         elif clean_key in ("pagedown", "page_down", "pgdn"):
@@ -1694,7 +1837,7 @@ class TuiApplication:
 
     def _confirmation_body(self, mode: TerminalMode, width: int, viewport_height: int) -> List[str]:
         """Keep recent work visible while the permission card owns the prompt."""
-        card = self.permission_surface.render(mode=mode, width=width)
+        card = self.permission_surface.render(mode=mode, width=width, height=viewport_height)
         if len(card) >= viewport_height:
             return card[-viewport_height:]
 
@@ -1719,13 +1862,13 @@ class TuiApplication:
                 body = self._confirmation_body(mode=mode, width=width, viewport_height=vh)
             elif self.state == InputState.OVERLAY:
                 if self.active_overlay == "review":
-                    body = self.review_overlay.render(mode=mode, width=width)
+                    body = self.review_overlay.render(mode=mode, width=width, height=vh)
                 elif self.active_overlay == "palette":
                     body = self.command_palette.render(mode=mode, width=width)
                 elif self.active_overlay == "tree":
                     body = self.file_tree.render(mode=mode, width=width)
                 elif self.active_overlay == "task":
-                    body = self.task_view.render(mode=mode, width=width)
+                    body = self.task_view.render(mode=mode, width=width, height=vh)
                 else:
                     body = []
             else:
@@ -1748,13 +1891,13 @@ class TuiApplication:
                 body = self._confirmation_body(mode=mode, width=width, viewport_height=vh)
             elif self.state == InputState.OVERLAY:
                 if self.active_overlay == "review":
-                    body = self.review_overlay.render(mode=mode, width=width)
+                    body = self.review_overlay.render(mode=mode, width=width, height=vh)
                 elif self.active_overlay == "palette":
                     body = self.command_palette.render(mode=mode, width=width)
                 elif self.active_overlay == "tree":
                     body = self.file_tree.render(mode=mode, width=width)
                 elif self.active_overlay == "task":
-                    body = self.task_view.render(mode=mode, width=width)
+                    body = self.task_view.render(mode=mode, width=width, height=vh)
                 else:
                     body = []
             else:
@@ -1809,32 +1952,33 @@ class TuiApplication:
         top_border = f"╭─ ClaireCoder " + ("─" * max(0, box_w - 27)) + " ● v0.1.0 ─╮"
         lines.append(top_border)
         
-        status_row = f"dir: {self.header.directory}   model: {self.header.model}   mode: {self.header.mode}   session: {self.header.session_id}"
-        status_row2 = f"task: {self.header.task_progress}   context: {self.header.context_usage}"
+        status_row = f"dir: {self.header.directory}   model: {self.header.model}   mode: {self.header.mode}"
+        status_row2 = f"session: {self.header.session_id}   task: {self.header.task_progress}   context: {self.header.context_usage}"
         
         lines.append(frame_row(status_row))
         lines.append(frame_row(status_row2))
-        lines.append(frame_row(""))
+        divider = "├" + ("─" * (box_w - 2)) + "┤"
+        lines.append(divider)
 
         # 2. Main canvas body area (fixed vh rows)
         if self.state == InputState.CONFIRMATION and self.permission_surface.has_pending():
             confirmation_lines = self._confirmation_body(mode=mode, width=inner_w, viewport_height=vh)
-            body_lines = [f" {c}" for c in confirmation_lines]
+            body_lines = confirmation_lines
         elif self.state == InputState.OVERLAY:
             overlay_lines: List[str] = []
             if self.active_overlay == "wizard":
                 overlay_lines = self.wizard.render(width=inner_w)
             elif self.active_overlay == "review":
-                overlay_lines = self.review_overlay.render(mode=mode, width=inner_w)
+                overlay_lines = self.review_overlay.render(mode=mode, width=inner_w, height=vh)
             elif self.active_overlay == "palette":
                 overlay_lines = self.command_palette.render(mode=mode, width=inner_w)
             elif self.active_overlay == "tree":
                 overlay_lines = self.file_tree.render(mode=mode, width=inner_w)
             elif self.active_overlay == "task":
-                overlay_lines = self.task_view.render(mode=mode, width=inner_w)
+                overlay_lines = self.task_view.render(mode=mode, width=inner_w, height=vh)
             elif self.active_overlay == "model_selector":
                 overlay_lines = self.model_selector.render(width=inner_w)
-            body_lines = [f" {o}" for o in overlay_lines]
+            body_lines = overlay_lines
         else:
             # Full-width transcript (no right mascot panel)
             transcript_lines = self.transcript.get_visible_lines()
@@ -1860,14 +2004,15 @@ class TuiApplication:
                 lines.append(frame_row("", row_idx=index))
 
         # 3. Bottom Frame: Prompt and Shortcuts (4 rows)
-        lines.append(frame_row(""))
+        bot_divider = "├" + ("─" * (box_w - 2)) + "┤"
+        lines.append(bot_divider)
         prompt_line = self.prompt.render_line(available_width=inner_w, focused=(self.state == InputState.NORMAL))
         lines.append(frame_row(prompt_line))
         
         if self.is_exit_confirmation_active():
             shortcut_all = "Press Ctrl+C again to exit ClaireCoder."
         else:
-            shortcut_all = "ctrl+c interrupt   ctrl+t file tree   ctrl+r review changes   ctrl+p task view   /commands"
+            shortcut_all = "ctrl+c interrupt  ctrl+t tree  ctrl+r review  ctrl+p tasks  ctrl+o details  /commands"
         lines.append(frame_row(shortcut_all))
         
         bot_border = "╰" + ("─" * (box_w - 2)) + "╯"

@@ -14,7 +14,7 @@ def create_preview_app(mode: Optional[TerminalMode] = None) -> TuiApplication:
     """Creates a pre-populated TuiApplication with realistic mock session state matching reference."""
     term = TerminalCapability(width=104, height=30, mode=mode)
     app = TuiApplication(terminal=term)
-    app.transcript.resize(20)
+    app.transcript.resize(app.get_viewport_height())
 
     # 1. Populate Header
     app.header.directory = "~/projects/claire-speech-engine"
@@ -130,6 +130,7 @@ def create_preview_app(mode: Optional[TerminalMode] = None) -> TuiApplication:
 
     # 4. Set prompt
     app.prompt.set_text("add support for interrupting mid-stream")
+    app.transcript.scroll_to_top()
     return app
 
 

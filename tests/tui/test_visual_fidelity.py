@@ -26,12 +26,12 @@ def test_main_tui_composition_fidelity():
     assert "context: 12.4k/200k" in full_text
 
     # 3. Activity Markers & Transcript
-    assert "> ✓ Reading src/decoder.py" in full_text
-    assert "> ● Editing src/decoder.py" in full_text
+    assert "✓ Reading src/decoder.py" in full_text
+    assert "● Editing src/decoder.py" in full_text
     assert "+18 -4" in full_text
-    assert "> ● Running pytest tests/decoder/" in full_text
+    assert "● Running pytest tests/decoder/" in full_text
     assert "12 passed in 1.2s" in full_text
-    assert "> ✓ Verification passed" in full_text
+    assert "✓ Verification passed" in full_text
     assert "All criteria satisfied." in full_text
 
     # 4. Claire Text Persona Message
@@ -51,9 +51,9 @@ def test_main_tui_composition_fidelity():
     # 6. Prompt & Footer
     assert "> add support for interrupting mid-stream█" in full_text
     assert "ctrl+c interrupt" in full_text
-    assert "ctrl+t file tree" in full_text
-    assert "ctrl+r review changes" in full_text
-    assert "ctrl+p task view" in full_text
+    assert "ctrl+t tree" in full_text
+    assert "ctrl+r review" in full_text
+    assert "ctrl+p tasks" in full_text
     assert "/commands" in full_text
 
 def test_loading_screen_composition_fidelity():

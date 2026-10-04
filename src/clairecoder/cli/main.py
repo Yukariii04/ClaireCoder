@@ -122,7 +122,11 @@ def run_interactive(
 
     tui = TuiApplication(workspace_root=os.getcwd())
     tui.connect_controller(app.interaction_controller)
-    tui.connect_runtime(app.event_emitter)
+    tui.connect_runtime(
+        app.event_emitter,
+        session_store=app.session_store,
+        changeset_store=app.changeset_store,
+    )
     tui.connect_config_manager(app.config_manager)
     tui.register_runtime_sync_callback(app.load_providers_from_config)
 

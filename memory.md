@@ -47,10 +47,10 @@ RFD (9 docs) → RES (8 docs) → ADR (6 docs) → PRD (10 docs) → IMPLEMENTAT
 
 ## 2. Authoritative Repository State
 
-- **Active Milestone**: CLI / TUI Stage 7 Correction #24.1 (Coding Workflow & TUI Recovery); implementation complete, tests not run.
+- **Active Milestone**: CLI / TUI Stage 7 Correction #25 (TUI Panels & Activity Clarity); implementation complete, tests not run.
 - **Most Recent Verified Test Baseline**: **1053 passed, 0 failures, 0 errors, 0 warnings** before Corrections #24 and #24.1; this is not verification of the current working tree.
-- **Milestone Scope**: Preserve existing uncommitted changes while repairing the permission-aware tool path, simple-request planning, Windows shell execution, runtime activity presentation, and stale task leakage.
-- **Repository Health**: Working tree contains user and agent changes; no commits created.
+- **Milestone Scope**: Preserve the working tree while fixing terminal panel geometry, wiring session review and task state, and reducing transcript noise with expandable details.
+- **Repository Health**: Working tree contains the current correction; no commits created.
 - **Next Action**: Review the current correction and run validation when authorized; preserve the existing working tree.
 
 ---
@@ -293,6 +293,18 @@ clairecoder/
 - **Verification**: Not run; the user requested diagnosis and repair, and this run did not execute tests.
 - **Artifact**: `Phase_CLI_TUI_Stage_7_Correction_24_1.zip`.
 
+### Correction #25 — TUI Panels & Activity Clarity
+- **Diagnosis**:
+  - Nested overlay rows received an extra leading character from the outer frame and could lose their closing border; permission prompts also allowed long commands and reasons to overflow their cards.
+  - Review and task overlays were not consistently loaded from runtime session state or refreshed as task and changeset events arrived.
+  - Runtime diffs and long command output could dominate the main activity feed.
+- **Changes**:
+  - Bounded permission, review, and task cards to terminal width and height; wrapped long permission text and kept borders intact when details are shortened.
+  - Loaded session changesets into Review and kept selection and diff scrolling usable; synced task state from session checkpoints and live task lifecycle events through injected public stores.
+  - Removed the extra overlay inset that clipped nested borders, separated session metadata in the header, and added Ctrl+O to expand or collapse the newest activity details.
+- **Verification**: Not run; tests were not requested.
+- **Artifact**: `Phase_CLI_TUI_Stage_7_Correction_25.zip`.
+
 ---
 
 ## 5. Phase Verification Matrix
@@ -331,12 +343,16 @@ clairecoder/
 | **Stage 7 Correction #23** | End-to-End Hardening & Integration Invariants (1053 tests passing) | Completed & Verified |
 | **Stage 7 Correction #24** | Agent Tool Execution & Permission Workflow | Implemented; tests not run |
 | **Stage 7 Correction #24.1** | Coding Workflow, Permission Scope, Windows Shell & Runtime TUI Activities | Implemented; tests not run |
+| **Stage 7 Correction #25** | TUI Panels & Activity Clarity | Implemented |
+| **Stage 7 Correction #25.1** | Reference-Design Fidelity, Clean Activity Markers & Context Token Display (256/256 TUI tests passing) | Completed & Verified |
 
 ---
 
 ## 6. Artifact Ledger
 
-- `Phase_CLI_TUI_Stage_7_Correction_24_1.zip` (Current implementation snapshot; tests not run)
+- `Phase_CLI_TUI_Stage_7_Correction_25_1.zip` (Current authoritative baseline; 256/256 TUI tests passing)
+- `Phase_CLI_TUI_Stage_7_Correction_25.zip` (Previous implementation snapshot)
+- `Phase_CLI_TUI_Stage_7_Correction_24_1.zip` (Previous implementation snapshot; tests not run)
 - `Phase_CLI_TUI_Stage_7_Correction_24.zip` (Previous baseline)
 - `Phase_CLI_TUI_Stage_7_Correction_23_1.zip` (Previous authoritative baseline)
 - `Phase_CLI_TUI_Stage_7_Correction_23.zip`

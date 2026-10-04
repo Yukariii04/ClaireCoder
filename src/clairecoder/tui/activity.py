@@ -175,7 +175,7 @@ class ActivityEvent:
     def is_failed(self) -> bool:
         return self.status == ActivityStatus.FAILED
 
-    def render_lines(self, width: int = 68) -> List[str]:
+    def render_lines(self, width: int = 68, include_diff: bool = True) -> List[str]:
         """Render activity into display lines matching reference UX."""
         if self.change_summary is not None:
             return self.change_summary.format_summary(width=width)
@@ -205,10 +205,10 @@ class ActivityEvent:
                 header = f"{marker} Reading {tgt}"
 
         elif op == ActivityOperation.EDITING:
-            header = f"{marker} {'Edited' if self.status == ActivityStatus.COMPLETED else 'Editing'} {tgt}"
+            header = f"{marker} Editing {tgt}"
 
         elif op == ActivityOperation.CREATING:
-            header = f"{marker} {'Created' if self.status == ActivityStatus.COMPLETED else 'Creating'} {tgt}"
+            header = f"{marker} Creating {tgt}"
 
         elif op == ActivityOperation.DELETING:
             if self.status == ActivityStatus.COMPLETED:
@@ -258,12 +258,26 @@ class ActivityEvent:
                     if line.strip():
                         lines.append(f"  {line.strip()}")
 
-        if self.diff_info and self.diff_info.lines:
-            for diff_line in self.diff_info.lines[:8]:
+        if self.diff_info and self.diff_info.lines and include_diff:
+            # Render diff inside a bordered box matching the reference design
+            diff_lines_raw = self.diff_info.lines[:12]
+            # Calculate inner box width
+            inner_w = max(30, width - 6)
+            box_top = f"  ┌{'─' * inner_w}┐"
+            box_bot = f"  └{'─' * inner_w}┘"
+            lines.append(box_top)
+            for diff_line in diff_lines_raw:
                 prefix = "+" if diff_line.type == "add" else ("-" if diff_line.type == "remove" else " ")
-                lines.append(f"  {prefix} {diff_line.content}")
-            if len(self.diff_info.lines) > 8:
+                content = f"{prefix} {diff_line.content}"
+                if len(content) > inner_w:
+                    content = content[:inner_w - 1] + "…"
+                pad = max(0, inner_w - len(content))
+                lines.append(f"  │{content}{' ' * pad}│")
+            lines.append(box_bot)
+            if len(self.diff_info.lines) > 12:
                 lines.append("  …")
+        elif self.diff_info and self.diff_info.lines:
+            lines.append("  Diff hidden · Ctrl+O to expand")
 
         return lines
 

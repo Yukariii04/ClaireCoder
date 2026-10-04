@@ -87,11 +87,19 @@ class TaskViewOverlay:
 
         return True  # Absorb all input while overlay is open
 
-    def render(self, mode: TerminalMode = TerminalMode.FULL, width: int = 58) -> List[str]:
+    def render(
+        self,
+        mode: TerminalMode = TerminalMode.FULL,
+        width: int = 58,
+        height: Optional[int] = None,
+    ) -> List[str]:
         """Renders the task / workflow overlay card with bounded vertical scrolling."""
-        card_w = max(42, min(width, 58))
+        if height is not None and height < 4:
+            return [visible_slice("Workflow view needs more terminal height.", 0, max(1, width))]
+        card_w = max(8, min(width, 58))
         inner_w = card_w - 4
-        body_h = self.card_height - 3  # Top border (1) + bottom border (1) + footer hint (1)
+        card_height = self.card_height if height is None else max(4, min(self.card_height, height))
+        body_h = card_height - 3  # Top border (1) + bottom border (1) + footer hint (1)
 
         def frame_line(content: str = "") -> str:
             vis = visible_length(content)
@@ -165,13 +173,23 @@ class TaskViewOverlay:
 
         # 3. Assemble framed lines
         lines: List[str] = []
-        top_bar = "╭─ Current Workflow " + ("─" * max(0, card_w - 25)) + " x ─╮"
+        prefix = "╭─"
+        title = " Current Workflow "
+        suffix = " x ─╮"
+        if card_w < 14:
+            top_bar = "╭" + ("─" * max(0, card_w - 2)) + "╮"
+        elif len(prefix) + len(title) + len(suffix) > card_w:
+            title = " Tasks "
+            suffix = " ─╮"
+            top_bar = prefix + title + ("─" * max(0, card_w - len(prefix) - len(title) - len(suffix))) + suffix
+        else:
+            top_bar = prefix + title + ("─" * max(0, card_w - len(prefix) - len(title) - len(suffix))) + suffix
         lines.append(top_bar)
 
         for row in visible_rows:
             lines.append(frame_line(row))
 
-        while len(lines) < self.card_height - 2:
+        while len(lines) < card_height - 2:
             lines.append(frame_line(""))
 
         # Footer with scroll hints if scrollable

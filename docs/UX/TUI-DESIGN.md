@@ -36,6 +36,10 @@ the terminal interface.
 5. **Diffs are contextual** — changes appear inline when useful and collapse to
    summaries when large.
 
+Long file diffs and command output stay collapsed in the transcript by default.
+`Ctrl+O` expands or collapses the newest activity with hidden details; use
+`Ctrl+R` to browse the complete session diff.
+
 6. **Workflow-aware, not workflow-owning** — task and workflow state may be
    displayed, but the TUI never becomes its owner.
 
@@ -135,7 +139,7 @@ appearance and density:
     ├────────────────────────────────────────────────────────────────────┤
     │ > add support for interrupting mid-stream█                        │
     │ ctrl+c interrupt   ctrl+t file tree   ctrl+r review changes       │
-    │ ctrl+p task view   ? help   /commands                             │
+    │ ctrl+p task view   ctrl+o details   ? help   /commands             │
     └────────────────────────────────────────────────────────────────────┘
 
 This compact representation is a design reference, NOT a hard terminal
@@ -327,7 +331,7 @@ Ctrl+R opens the session change review.
     │ 46 insertions(+)                                       │
     │ 4 deletions(-)                                         │
     │                                                        │
-    │ [enter] view diff   [c] commit   [q] back              │
+    │ [↑/↓] select   [enter] view diff   [c] commit   [q] back│
     │                                                        │
     │ Press enter on a file to view full diff                │
     └────────────────────────────────────────────────────────┘
